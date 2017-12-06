@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -19,7 +19,6 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#define BOOST_TEST_DYN_LINK
 #define BOOST_TEST_MODULE core
 
 #include <boost/test/unit_test.hpp>
@@ -28,14 +27,14 @@
 
 inline
 uint32_t
-do_compute_crc(crc32& c) {
+do_compute_crc(utils::crc32& c) {
     return c.get();
 }
 
 template <typename T, typename... Rest>
 inline
 uint32_t
-do_compute_crc(crc32& c, const T& val, const Rest&... rest) {
+do_compute_crc(utils::crc32& c, const T& val, const Rest&... rest) {
     c.process(val);
     return do_compute_crc(c, rest...);
 }
@@ -44,7 +43,7 @@ template <typename... T>
 inline
 uint32_t
 compute_crc(const T&... vals) {
-    crc32 c;
+    utils::crc32 c;
     return do_compute_crc(c, vals...);
 }
 

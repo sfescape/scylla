@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -20,6 +20,7 @@
  */
 
 #include <boost/test/unit_test.hpp>
+#include "utils/fb_utilities.hh"
 #include "locator/network_topology_strategy.hh"
 #include "tests/test-utils.hh"
 #include "core/sstring.hh"
@@ -30,7 +31,7 @@
 #include <iostream>
 #include <sstream>
 
-logging::logger logger("NetworkTopologyStrategyLogger");
+static logging::logger nlogger("NetworkTopologyStrategyLogger");
 
 using namespace locator;
 
@@ -40,7 +41,7 @@ struct ring_point {
 };
 
 void print_natural_endpoints(double point, const std::vector<inet_address> v) {
-    logger.debug("Natural endpoints for a token {}:", point);
+    nlogger.debug("Natural endpoints for a token {}:", point);
     std::string str;
     std::ostringstream strm(str);
 
@@ -48,7 +49,7 @@ void print_natural_endpoints(double point, const std::vector<inet_address> v) {
         strm<<addr<<" ";
     }
 
-    logger.debug("{}", strm.str());
+    nlogger.debug("{}", strm.str());
 }
 
 void strategy_sanity_check(
@@ -155,6 +156,9 @@ void full_ring_check(const std::vector<ring_point>& ring_points,
 }
 
 future<> simple_test() {
+    utils::fb_utilities::set_broadcast_address(gms::inet_address("localhost"));
+    utils::fb_utilities::set_broadcast_rpc_address(gms::inet_address("localhost"));
+
     // Create the RackInferringSnitch
     return i_endpoint_snitch::create_snitch("RackInferringSnitch").then(
         [] {
@@ -226,6 +230,9 @@ future<> simple_test() {
 }
 
 future<> heavy_origin_test() {
+    utils::fb_utilities::set_broadcast_address(gms::inet_address("localhost"));
+    utils::fb_utilities::set_broadcast_rpc_address(gms::inet_address("localhost"));
+
     // Create the RackInferringSnitch
     return i_endpoint_snitch::create_snitch("RackInferringSnitch").then(
         [] {
@@ -264,7 +271,7 @@ future<> heavy_origin_test() {
                     tokens[address].emplace(token{dht::token::kind::key,
                             {(int8_t*)d2t(token_point / total_eps).data(), 8}});
 
-                    logger.debug("adding node {} at {}", address, token_point);
+                    nlogger.debug("adding node {} at {}", address, token_point);
 
                     token_point++;
                 }

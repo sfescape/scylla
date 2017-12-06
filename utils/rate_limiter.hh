@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -24,6 +24,7 @@
 #include "core/timer.hh"
 #include "core/semaphore.hh"
 #include "core/reactor.hh"
+#include "seastarx.hh"
 
 namespace utils {
 
@@ -36,7 +37,7 @@ class rate_limiter {
 private:
     timer<lowres_clock> _timer;
     size_t _units_per_s;
-    semaphore _sem;
+    semaphore _sem {0};
 
     void on_timer();
 public:

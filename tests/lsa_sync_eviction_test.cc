@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -29,6 +29,8 @@
 #include "utils/managed_ref.hh"
 #include "tests/perf/perf.hh"
 #include "log.hh"
+
+#include <random>
 
 int main(int argc, char** argv) {
     namespace bpo = boost::program_options;
@@ -64,7 +66,7 @@ int main(int argc, char** argv) {
                 }
 
                 // Evict in random order to stress more
-                std::random_shuffle(refs.begin(), refs.end());
+                std::shuffle(refs.begin(), refs.end(), std::random_device());
                 r.make_evictable([&] {
                     return with_allocator(r.allocator(), [&] {
                         if (refs.empty()) {
@@ -83,7 +85,7 @@ int main(int argc, char** argv) {
                 std::cout << "Allocated " << refs.size() << " evictable objects" << std::endl;
                 print_region_stats();
 
-                using clk = std::chrono::high_resolution_clock;
+                using clk = std::chrono::steady_clock;
                 auto start = clk::now();
 
                 // Allocate native memory, should evict

@@ -15,7 +15,7 @@
                "summary":"get List of running compactions",
                "type":"array",
                "items":{
-                  "type":"jsonmap"
+                  "type":"summary"
                },
                "nickname":"get_compactions",
                "produces":[
@@ -27,16 +27,35 @@
          ]
       },
       {
-         "path":"/compaction_manager/compaction_summary",
+         "path":"/compaction_manager/compaction_history",
          "operations":[
             {
                "method":"GET",
-               "summary":"get compaction summary",
+               "summary":"get List of the compaction history",
                "type":"array",
                "items":{
-                  "type":"string"
+                  "type":"history"
                },
-               "nickname":"get_compaction_summary",
+               "nickname":"get_compaction_history",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/compaction_manager/compaction_info",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"get a list of all active compaction info",
+               "type":"array",
+               "items":{
+                  "type":"compaction_info"
+               },
+               "nickname":"get_compaction_info",
                "produces":[
                   "application/json"
                ],
@@ -87,7 +106,7 @@
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
-                     "paramType":"string"
+                     "paramType":"query"
                   }
                ]
             }
@@ -155,32 +174,112 @@
     }
    ],
    "models":{
-      "mapper":{
-         "id":"mapper",
-         "description":"A key value mapping",
+      "row_merged":{
+         "id":"row_merged",
+         "description":"A row merged information",
          "properties":{
             "key":{
-               "type":"string",
-               "description":"The key"
+               "type":"int",
+               "description":"The number of sstable"
             },
             "value":{
-               "type":"string",
-               "description":"The value"
+               "type":"long",
+               "description":"The number or row compacted"
             }
          }
       },
-      "jsonmap":{
-         "id":"jsonmap",
-         "description":"A json representation of a map as a list of key value",
+      "compaction_info" :{
+          "id": "compaction_info",
+          "description":"A key value mapping",
+          "properties":{
+            "operation_type":{
+               "type":"string",
+               "description":"The operation type"
+            },
+            "completed":{
+               "type":"long",
+               "description":"The current completed"
+            },
+            "total":{
+               "type":"long",
+               "description":"The total to compact"
+            },
+            "unit":{
+               "type":"string",
+               "description":"The compacted unit"
+            }
+          }
+      },
+      "summary":{
+         "id":"summary",
+         "description":"A compaction summary object",
          "properties":{
-            "value":{
-               "type":"array",
-               "items":{
-                  "type":"mapper"
-               },
-               "description":"A list of key, value mapping"
+            "id":{
+               "type":"string",
+               "description":"The UUID"
+            },
+            "ks":{
+               "type":"string",
+               "description":"The keyspace name"
+            },
+            "cf":{
+               "type":"string",
+               "description":"The column family name"
+            },
+            "completed":{
+               "type":"long",
+               "description":"The number of units completed"
+            },
+            "total":{
+               "type":"long",
+               "description":"The total number of units"
+            },
+            "task_type":{
+               "type":"string",
+               "description":"The task compaction type"
+            },
+            "unit":{
+               "type":"string",
+               "description":"The units being used"
             }
          }
+      },
+      "history": {
+      "id":"history",
+      "description":"Compaction history information",
+      "properties":{
+            "id":{
+               "type":"string",
+               "description":"The UUID"
+            },
+            "cf":{
+               "type":"string",
+               "description":"The column family name"
+            },
+            "ks":{
+               "type":"string",
+               "description":"The keyspace name"
+            },
+            "compacted_at":{
+               "type":"long",
+               "description":"The time of compaction"
+            },
+            "bytes_in":{
+               "type":"long",
+               "description":"Bytes in"
+            },
+            "bytes_out":{
+               "type":"long",
+               "description":"Bytes out"
+            },
+            "rows_merged":{
+               "type":"array",
+               "items":{
+                  "type":"row_merged"
+               },
+               "description":"The merged rows"
+            }
+        }
       }
    }
 }

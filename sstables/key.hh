@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -22,22 +22,27 @@
 #pragma once
 #include "bytes.hh"
 #include "schema.hh"
-#include <boost/any.hpp>
 #include "core/future.hh"
-
-class partition_key;
-class partition_key_view;
-class clustering_key;
+#include "database_fwd.hh"
+#include "keys.hh"
+#include "compound_compat.hh"
+#include "dht/i_partitioner.hh"
 
 namespace sstables {
 
 class key_view {
     bytes_view _bytes;
 public:
-    key_view(bytes_view b) : _bytes(b) {}
+    explicit key_view(bytes_view b) : _bytes(b) {}
     key_view() : _bytes() {}
 
-    std::vector<bytes> explode(const schema& s) const;
+    std::vector<bytes_view> explode(const schema& s) const {
+        return composite_view(_bytes, s.partition_key_size() > 1).explode();
+    }
+
+    partition_key to_partition_key(const schema& s) const {
+        return partition_key::from_exploded_view(explode(s));
+    }
 
     bool operator==(const key_view& k) const { return k._bytes == _bytes; }
     bool operator!=(const key_view& k) const { return !(k == *this); }
@@ -52,53 +57,61 @@ public:
         return compare_unsigned(_bytes, other._bytes);
     }
 
-    int tri_compare(const schema& s, partition_key_view other) const;
-};
-
-enum class composite_marker : bytes::value_type {
-    start_range = -1,
-    none = 0,
-    end_range = 1,
-};
-
-inline void check_marker(bytes_view component, composite_marker expected) {
-    auto found = composite_marker(component.back());
-    if (found != expected) {
-        throw runtime_exception(sprint("Unexpected marker. Found %d, expected %d\n", uint8_t(found), uint8_t(expected)));
+    int tri_compare(const schema& s, partition_key_view other) const {
+        auto lf = other.legacy_form(s);
+        return lexicographical_tri_compare(
+            _bytes.begin(), _bytes.end(), lf.begin(), lf.end(),
+            [] (uint8_t b1, uint8_t b2) { return (int)b1 - b2; });
     }
-}
-
-inline void check_marker(bytes_view component, composite_marker expected, composite_marker alternative) {
-    auto found = composite_marker(component.back());
-    if ((found == expected) || (found == alternative)) {
-        return;
-    }
-    throw runtime_exception(sprint("Unexpected marker. Found %d, expected %d or %d\n", uint8_t(found), uint8_t(expected)));
-}
+};
 
 // Our internal representation differs slightly (in the way it serializes) from Origin.
 // In order to be able to achieve read and write compatibility for sstables - so they can
 // be imported and exported - we need to always convert a key to this representation.
 class key {
+public:
     enum class kind {
         before_all_keys,
         regular,
         after_all_keys,
     };
+private:
     kind _kind;
     bytes _bytes;
+
+    static bool is_compound(const schema& s) {
+        return s.partition_key_size() > 1;
+    }
 public:
     key(bytes&& b) : _kind(kind::regular), _bytes(std::move(b)) {}
     key(kind k) : _kind(k) {}
-    static key from_bytes(bytes b) { return key(std::move(b)); }
-    static key from_deeply_exploded(const schema& s, const std::vector<boost::any>& v);
-    static key from_exploded(const schema& s, const std::vector<bytes>& v);
-    static key from_exploded(const schema& s, std::vector<bytes>&& v);
+    static key from_bytes(bytes b) {
+        return key(std::move(b));
+    }
+    template <typename RangeOfSerializedComponents>
+    static key make_key(const schema& s, RangeOfSerializedComponents&& values) {
+        return key(composite::serialize_value(std::forward<decltype(values)>(values), is_compound(s)).release_bytes());
+    }
+    static key from_deeply_exploded(const schema& s, const std::vector<data_value>& v) {
+        return make_key(s, v);
+    }
+    static key from_exploded(const schema& s, std::vector<bytes>& v) {
+        return make_key(s, v);
+    }
+    static key from_exploded(const schema& s, std::vector<bytes>&& v) {
+        return make_key(s, std::move(v));
+    }
     // Unfortunately, the _bytes field for the partition_key are not public. We can't move.
-    static key from_partition_key(const schema& s, const partition_key& pk);
-    partition_key to_partition_key(const schema& s);
+    static key from_partition_key(const schema& s, partition_key_view pk) {
+        return make_key(s, pk);
+    }
+    partition_key to_partition_key(const schema& s) const {
+        return partition_key::from_exploded_view(explode(s));
+    }
 
-    std::vector<bytes> explode(const schema& s) const;
+    std::vector<bytes_view> explode(const schema& s) const {
+        return composite_view(_bytes, is_compound(s)).explode();
+    }
 
     int32_t tri_compare(key_view k) const {
         if (_kind == kind::before_all_keys) {
@@ -115,7 +128,7 @@ public:
     explicit operator bytes_view() const {
         return _bytes;
     }
-    bytes& get_bytes() {
+    const bytes& get_bytes() const {
         return _bytes;
     }
     friend key minimum_key();
@@ -130,36 +143,20 @@ inline key maximum_key() {
     return key(key::kind::after_all_keys);
 };
 
-class composite_view {
-    bytes_view _bytes;
+class decorated_key_view {
+    const dht::token& _token;
+    key_view _partition_key;
 public:
-    composite_view(bytes_view b) : _bytes(b) {}
+    decorated_key_view(const dht::token& token, key_view partition_key) noexcept
+        : _token(token), _partition_key(partition_key) { }
 
-    std::vector<bytes> explode() const;
+    const dht::token& token() const {
+        return _token;
+    }
 
-    explicit operator bytes_view() const {
-        return _bytes;
+    key_view key() const {
+        return _partition_key;
     }
 };
 
-class composite {
-    bytes _bytes;
-public:
-    composite (bytes&& b) : _bytes(std::move(b)) {}
-    template <typename Describer>
-    auto describe_type(Describer f) const { return f(const_cast<bytes&>(_bytes)); }
-
-    static composite from_bytes(bytes b) { return composite(std::move(b)); }
-    template <typename ClusteringElement>
-    static composite from_clustering_element(const schema& s, const ClusteringElement& ce);
-    static composite from_exploded(const std::vector<bytes_view>& v, composite_marker m = composite_marker::none);
-    static composite static_prefix(const schema& s);
-    size_t size() const { return _bytes.size(); }
-    explicit operator bytes_view() const {
-        return _bytes;
-    }
-    operator composite_view() const {
-        return composite_view(_bytes);
-    }
-};
 }

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -49,16 +49,16 @@
 #include "gms/inet_address.hh"
 #include "database.hh"
 
-#include <iostream>
+#include <iosfwd>
 #include <vector>
 
 namespace db {
 
 extern logging::logger cl_logger;
 
-size_t quorum_for(keyspace& ks);
+size_t quorum_for(const keyspace& ks);
 
-size_t local_quorum_for(keyspace& ks, const sstring& dc);
+size_t local_quorum_for(const keyspace& ks, const sstring& dc);
 
 size_t block_for_local_serial(keyspace& ks);
 
@@ -76,22 +76,23 @@ inline size_t count_local_endpoints(Range& live_endpoints) {
 }
 
 std::vector<gms::inet_address>
-filter_for_query_dc_local(consistency_level cl,
-                          keyspace& ks,
-                          const std::vector<gms::inet_address>& live_endpoints);
-
-std::vector<gms::inet_address>
 filter_for_query(consistency_level cl,
                  keyspace& ks,
                  std::vector<gms::inet_address> live_endpoints,
-                 read_repair_decision read_repair);
+                 read_repair_decision read_repair, gms::inet_address* extra, column_family* cf);
 
-std::vector<gms::inet_address> filter_for_query(consistency_level cl, keyspace& ks, std::vector<gms::inet_address>& live_endpoints);
+std::vector<gms::inet_address> filter_for_query(consistency_level cl, keyspace& ks, std::vector<gms::inet_address>& live_endpoints, column_family* cf);
 
-template <typename Range>
-inline std::unordered_map<sstring, size_t> count_per_dc_endpoints(
+struct dc_node_count {
+    size_t live = 0;
+    size_t pending = 0;
+};
+
+template <typename Range, typename PendingRange = std::array<gms::inet_address, 0>>
+inline std::unordered_map<sstring, dc_node_count> count_per_dc_endpoints(
         keyspace& ks,
-        Range& live_endpoints) {
+        Range& live_endpoints,
+        const PendingRange& pending_endpoints = std::array<gms::inet_address, 0>()) {
     using namespace locator;
 
     auto& rs = ks.get_replication_strategy();
@@ -100,9 +101,9 @@ inline std::unordered_map<sstring, size_t> count_per_dc_endpoints(
     network_topology_strategy* nrs =
             static_cast<network_topology_strategy*>(&rs);
 
-    std::unordered_map<sstring, size_t> dc_endpoints;
+    std::unordered_map<sstring, dc_node_count> dc_endpoints;
     for (auto& dc : nrs->get_datacenters()) {
-        dc_endpoints.emplace(dc, 0);
+        dc_endpoints.emplace(dc, dc_node_count());
     }
 
     //
@@ -111,7 +112,11 @@ inline std::unordered_map<sstring, size_t> count_per_dc_endpoints(
     // nrs->get_datacenters().
     //
     for (auto& endpoint : live_endpoints) {
-        ++(dc_endpoints[snitch_ptr->get_datacenter(endpoint)]);
+        ++(dc_endpoints[snitch_ptr->get_datacenter(endpoint)].live);
+    }
+
+    for (auto& endpoint : pending_endpoints) {
+        ++(dc_endpoints[snitch_ptr->get_datacenter(endpoint)].pending);
     }
 
     return dc_endpoints;
@@ -122,21 +127,23 @@ is_sufficient_live_nodes(consistency_level cl,
                          keyspace& ks,
                          const std::vector<gms::inet_address>& live_endpoints);
 
-template<typename Range>
+template<typename Range, typename PendingRange>
 inline bool assure_sufficient_live_nodes_each_quorum(
         consistency_level cl,
         keyspace& ks,
-        Range& live_endpoints) {
+        Range& live_endpoints,
+        const PendingRange& pending_endpoints) {
     using namespace locator;
 
     auto& rs = ks.get_replication_strategy();
 
     if (rs.get_type() == replication_strategy_type::network_topology) {
-        for (auto& entry : count_per_dc_endpoints(ks, live_endpoints)) {
+        for (auto& entry : count_per_dc_endpoints(ks, live_endpoints, pending_endpoints)) {
             auto dc_block_for = local_quorum_for(ks, entry.first);
-            auto dc_live = entry.second;
+            auto dc_live = entry.second.live;
+            auto dc_pending = entry.second.pending;
 
-            if (dc_live < dc_block_for) {
+            if (dc_live < dc_block_for + dc_pending) {
                 throw exceptions::unavailable_exception(cl, dc_block_for, dc_live);
             }
         }
@@ -147,52 +154,51 @@ inline bool assure_sufficient_live_nodes_each_quorum(
     return false;
 }
 
-template<typename Range>
+template<typename Range, typename PendingRange = std::array<gms::inet_address, 0>>
 inline void assure_sufficient_live_nodes(
         consistency_level cl,
         keyspace& ks,
-        Range& live_endpoints) {
+        Range& live_endpoints,
+        const PendingRange& pending_endpoints = std::array<gms::inet_address, 0>()) {
     size_t need = block_for(ks, cl);
+
+    auto adjust_live_for_error = [] (size_t live, size_t pending) {
+        // DowngradingConsistencyRetryPolicy uses alive replicas count from Unavailable
+        // exception to adjust CL for retry. When pending node is present CL is increased
+        // by 1 internally, so reported number of live nodes has to be adjusted to take
+        // this into account
+        return pending <= live ? live - pending : 0;
+    };
 
     switch (cl) {
     case consistency_level::ANY:
         // local hint is acceptable, and local node is always live
         break;
     case consistency_level::LOCAL_ONE:
-        if (count_local_endpoints(live_endpoints) == 0) {
+        if (count_local_endpoints(live_endpoints) < count_local_endpoints(pending_endpoints) + 1) {
             throw exceptions::unavailable_exception(cl, 1, 0);
         }
         break;
     case consistency_level::LOCAL_QUORUM: {
         size_t local_live = count_local_endpoints(live_endpoints);
-        if (local_live < need) {
-#if 0
-            if (logger.isDebugEnabled())
-            {
-                StringBuilder builder = new StringBuilder("Local replicas [");
-                for (InetAddress endpoint : liveEndpoints)
-                {
-                    if (isLocal(endpoint))
-                        builder.append(endpoint).append(",");
-                }
-                builder.append("] are insufficient to satisfy LOCAL_QUORUM requirement of ").append(blockFor).append(" live nodes in '").append(DatabaseDescriptor.getLocalDataCenter()).append("'");
-                logger.debug(builder.toString());
-            }
-#endif
-            throw exceptions::unavailable_exception(cl, need, local_live);
+        size_t pending = count_local_endpoints(pending_endpoints);
+        if (local_live < need + pending) {
+            cl_logger.debug("Local replicas {} are insufficient to satisfy LOCAL_QUORUM requirement of needed {} and pending {}", live_endpoints, local_live, pending);
+            throw exceptions::unavailable_exception(cl, need, adjust_live_for_error(local_live, pending));
         }
         break;
     }
     case consistency_level::EACH_QUORUM:
-        if (assure_sufficient_live_nodes_each_quorum(cl, ks, live_endpoints)) {
+        if (assure_sufficient_live_nodes_each_quorum(cl, ks, live_endpoints, pending_endpoints)) {
             break;
         }
     // Fallthough on purpose for SimpleStrategy
     default:
         size_t live = live_endpoints.size();
-        if (live < need) {
-            cl_logger.debug("Live nodes {} do not satisfy ConsistencyLevel ({} required)", live, need);
-            throw exceptions::unavailable_exception(cl, need, live);
+        size_t pending = pending_endpoints.size();
+        if (live < need + pending) {
+            cl_logger.debug("Live nodes {} do not satisfy ConsistencyLevel ({} required, {} pending)", live, need, pending);
+            throw exceptions::unavailable_exception(cl, need, adjust_live_for_error(live, pending));
         }
         break;
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -19,11 +19,16 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <boost/test/unit_test.hpp>
 #include <core/distributed.hh>
 #include <core/app-template.hh>
 #include <core/sstring.hh>
 #include <random>
+
+// hack: perf_sstable falsely depends on Boost.Test, but we can't include it with
+// with statically linked boost
+#define BOOST_REQUIRE(x) (void)(x)
+#define BOOST_CHECK_NO_THROW(x) (void)(x)
+
 #include "perf_sstable.hh"
 
 using namespace sstables;
@@ -33,7 +38,7 @@ static unsigned parallelism = 1;
 
 future<> test_write(distributed<test_env>& dt) {
     return dt.invoke_on_all([] (test_env &t) {
-        t.fill_memtable();
+        return t.fill_memtable();
     }).then([&dt] {
         return time_runs(iterations, parallelism, dt, &test_env::flush_memtable);
     });
@@ -73,7 +78,7 @@ int main(int argc, char** argv) {
         ("num_columns", bpo::value<unsigned>()->default_value(5), "number of columns per row")
         ("column_size", bpo::value<unsigned>()->default_value(64), "size in bytes for each column")
         ("mode", bpo::value<sstring>()->default_value("index_write"), "one of: random_read, sequential_read, index_read, write, index_write (default)")
-        ("testdir", bpo::value<sstring>()->default_value("/var/lib/cassandra/perf-tests"), "directory in which to store the sstables");
+        ("testdir", bpo::value<sstring>()->default_value("/var/lib/scylla/perf-tests"), "directory in which to store the sstables");
 
     return app.run_deprecated(argc, argv, [&app] {
         auto test = make_lw_shared<distributed<test_env>>();

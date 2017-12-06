@@ -17,8 +17,8 @@
  */
 
 /*
- * Modified by Cloudius Systems
- * Copyright 2015 Cloudius Systems
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -46,16 +46,18 @@
 #include "core/future.hh"
 #include "core/shared_ptr.hh"
 #include "core/stream.hh"
-#include "utils/UUID.hh"
 #include "replay_position.hh"
+#include "commitlog_entry.hh"
 
-class file;
+namespace seastar { class file; }
+
+#include "seastarx.hh"
 
 namespace db {
 
 class config;
-
-using cf_id_type = utils::UUID;
+class rp_set;
+class rp_handle;
 
 /*
  * Commit Log tracks every write operation into the system. The aim of
@@ -93,11 +95,14 @@ using cf_id_type = utils::UUID;
  */
 class commitlog {
 public:
+    using timeout_clock = lowres_clock;
+
     class segment_manager;
     class segment;
 
+    friend class rp_handle;
 private:
-    std::unique_ptr<segment_manager> _segment_manager;
+    ::shared_ptr<segment_manager> _segment_manager;
 public:
     enum class sync_mode {
         PERIODIC, BATCH
@@ -111,6 +116,13 @@ public:
         uint64_t commitlog_total_space_in_mb = 0;
         uint64_t commitlog_segment_size_in_mb = 32;
         uint64_t commitlog_sync_period_in_ms = 10 * 1000; //TODO: verify default!
+        // Max number of segments to keep in pre-alloc reserve.
+        // Not (yet) configurable from scylla.conf.
+        uint64_t max_reserve_segments = 12;
+        // Max active writes/flushes. Default value
+        // zero means try to figure it out ourselves
+        uint64_t max_active_writes = 0;
+        uint64_t max_active_flushes = 0;
 
         sync_mode mode = sync_mode::PERIODIC;
     };
@@ -136,7 +148,7 @@ public:
         const uint32_t ver;
     };
 
-    commitlog(commitlog&&);
+    commitlog(commitlog&&) noexcept;
     ~commitlog();
 
     /**
@@ -145,6 +157,7 @@ public:
      * Optionally, could have an "init" func and require calling this.
      */
     static future<commitlog> create_commitlog(config);
+
 
     /**
      * Note: To be able to keep impl out of header file,
@@ -163,29 +176,50 @@ public:
     /**
      * Add a "Mutation" to the commit log.
      *
+     * Resolves with timed_out_error when timeout is reached.
+     *
      * @param mutation_func a function that writes 'size' bytes to the log, representing the mutation.
      */
-    future<replay_position> add(const cf_id_type& id, size_t size, serializer_func mutation_func);
+    future<rp_handle> add(const cf_id_type& id, size_t size, timeout_clock::time_point timeout, serializer_func mutation_func);
+
+    /**
+     * Template version of add.
+     * Resolves with timed_out_error when timeout is reached.
+     * @param mu an invokable op that generates the serialized data. (Of size bytes)
+     */
+    template<typename _MutationOp>
+    future<rp_handle> add_mutation(const cf_id_type& id, size_t size, timeout_clock::time_point timeout, _MutationOp&& mu) {
+        return add(id, size, timeout, [mu = std::forward<_MutationOp>(mu)](output& out) {
+            mu(out);
+        });
+    }
 
     /**
      * Template version of add.
      * @param mu an invokable op that generates the serialized data. (Of size bytes)
      */
     template<typename _MutationOp>
-    future<replay_position> add_mutation(const cf_id_type& id, size_t size, _MutationOp&& mu) {
-        return add(id, size, [mu = std::forward<_MutationOp>(mu)](output& out) {
-            mu(out);
-        });
+    future<rp_handle> add_mutation(const cf_id_type& id, size_t size, _MutationOp&& mu) {
+        return add_mutation(id, size, timeout_clock::time_point::max(), std::forward<_MutationOp>(mu));
     }
+
+    /**
+     * Add an entry to the commit log.
+     * Resolves with timed_out_error when timeout is reached.
+     * @param entry_writer a writer responsible for writing the entry
+     */
+    future<rp_handle> add_entry(const cf_id_type& id, const commitlog_entry_writer& entry_writer, timeout_clock::time_point timeout);
 
     /**
      * Modifies the per-CF dirty cursors of any commit log segments for the column family according to the position
      * given. Discards any commit log segments that are no longer used.
      *
      * @param cfId    the column family ID that was flushed
-     * @param context the replay position of the flush
+     * @param rp_set  the replay positions of the flush
      */
-    void discard_completed_segments(const cf_id_type&, const replay_position&);
+    void discard_completed_segments(const cf_id_type&, const rp_set&);
+
+    void discard_completed_segments(const cf_id_type&);
 
     /**
      * A 'flush_handler' is invoked when the CL determines that size on disk has
@@ -226,14 +260,46 @@ public:
      */
     std::vector<sstring> get_active_segment_names() const;
 
+    /**
+     * Returns a vector of segment paths which were
+     * preexisting when this instance of commitlog was created.
+     *
+     * The list will be empty when called for the second time.
+     */
+    std::vector<sstring> get_segments_to_replay();
+
     uint64_t get_total_size() const;
     uint64_t get_completed_tasks() const;
+    uint64_t get_flush_count() const;
     uint64_t get_pending_tasks() const;
+    uint64_t get_pending_flushes() const;
+    uint64_t get_pending_allocations() const;
+    uint64_t get_flush_limit_exceeded_count() const;
+    uint64_t get_num_segments_created() const;
+    uint64_t get_num_segments_destroyed() const;
+    /**
+     * Get number of inactive (finished), segments lingering
+     * due to still being dirty
+     */
+    uint64_t get_num_dirty_segments() const;
+    /**
+     * Get number of active segments, i.e. still being allocated to
+     */
+    uint64_t get_num_active_segments() const;
 
     /**
      * Returns the largest amount of data that can be written in a single "mutation".
      */
     size_t max_record_size() const;
+
+    /**
+     * Return max allowed pending writes (per this shard)
+     */
+    uint64_t max_active_writes() const;
+    /**
+     * Return max allowed pending flushes (per this shard)
+     */
+    uint64_t max_active_flushes() const;
 
     future<> clear();
 
@@ -251,6 +317,11 @@ public:
      * incoming writes to throw exceptions
      */
     future<> shutdown();
+    /**
+     * Ensure segments are released, even if we don't free the
+     * commitlog proper. (hint, our shutdown is "partial")
+     */
+    future<> release();
 
     future<std::vector<descriptor>> list_existing_descriptors() const;
     future<std::vector<descriptor>> list_existing_descriptors(const sstring& dir) const;
@@ -260,10 +331,31 @@ public:
 
     typedef std::function<future<>(temporary_buffer<char>, replay_position)> commit_load_reader_func;
 
+    class segment_data_corruption_error: public std::runtime_error {
+    public:
+        segment_data_corruption_error(std::string msg, uint64_t s)
+                : std::runtime_error(msg), _bytes(s) {
+        }
+        uint64_t bytes() const {
+            return _bytes;
+        }
+    private:
+        uint64_t _bytes;
+    };
+
     static subscription<temporary_buffer<char>, replay_position> read_log_file(file, commit_load_reader_func, position_type = 0);
-    static future<subscription<temporary_buffer<char>, replay_position>> read_log_file(const sstring&, commit_load_reader_func, position_type = 0);
+    static future<std::unique_ptr<subscription<temporary_buffer<char>, replay_position>>> read_log_file(
+            const sstring&, commit_load_reader_func, position_type = 0);
 private:
     commitlog(config);
+
+    struct entry_writer {
+        virtual size_t size(segment&) = 0;
+        // Returns segment-independent size of the entry. Must be <= than segment-dependant size.
+        virtual size_t size() = 0;
+        virtual void write(segment&, output&) = 0;
+        virtual ~entry_writer() {};
+    };
 };
 
 }

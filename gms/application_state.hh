@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -38,10 +38,11 @@
 
 #pragma once
 
+#include <ostream>
+
 namespace gms {
 
-enum class application_state
-{
+enum class application_state {
     STATUS = 0,
     LOAD,
     SCHEMA,
@@ -56,10 +57,10 @@ enum class application_state
     NET_VERSION,
     HOST_ID,
     TOKENS,
+    SUPPORTED_FEATURES,
+    CACHE_HITRATES,
+    SCHEMA_TABLES_VERSION,
     // pad to allow adding new states to existing cluster
-    X1,
-    X2,
-    X3,
     X4,
     X5,
     X6,
@@ -68,5 +69,7 @@ enum class application_state
     X9,
     X10,
 };
+
+std::ostream& operator<<(std::ostream& os, const application_state& m);
 
 }

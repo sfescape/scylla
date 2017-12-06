@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -68,13 +68,11 @@ struct session_complete_event : public stream_event {
     using inet_address = gms::inet_address;
     inet_address peer;
     bool success;
-    int session_index;
 
     session_complete_event(shared_ptr<stream_session> session)
         : stream_event(stream_event::type::STREAM_COMPLETE, session->plan_id())
         , peer(session->peer)
-        , success(session->is_success())
-        , session_index(session->session_index()) {
+        , success(session->is_success()) {
     }
 };
 
@@ -85,13 +83,6 @@ struct progress_event : public stream_event {
         : stream_event(stream_event::type::FILE_PROGRESS, plan_id_)
         , progress(std::move(progress_)) {
     }
-#if 0
-    @Override
-    public String toString()
-    {
-        return "<ProgressEvent " + progress + ">";
-    }
-#endif
 };
 
 struct session_prepared_event : public stream_event {

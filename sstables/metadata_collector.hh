@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -153,11 +153,7 @@ struct column_stats {
     max_long_tracker max_timestamp;
     max_int_tracker max_local_deletion_time;
     /** histogram of tombstone drop time */
-    streaming_histogram tombstone_histogram;
-
-    /** max and min column names according to comparator */
-    std::vector<bytes> min_column_names;
-    std::vector<bytes> max_column_names;
+    utils::streaming_histogram tombstone_histogram;
 
     bool has_legacy_counter_shards;
 
@@ -199,9 +195,9 @@ public:
     }
 private:
     // EH of 150 can track a max value of 1697806495183, i.e., > 1.5PB
-    estimated_histogram _estimated_row_size{150};
+    utils::estimated_histogram _estimated_row_size{150};
     // EH of 114 can track a max value of 2395318855, i.e., > 2B columns
-    estimated_histogram _estimated_column_count{114};
+    utils::estimated_histogram _estimated_column_count{114};
     db::replay_position _replay_position;
     uint64_t _min_timestamp = std::numeric_limits<uint64_t>::max();
     uint64_t _max_timestamp = std::numeric_limits<uint64_t>::min();
@@ -209,10 +205,10 @@ private:
     int _max_local_deletion_time = std::numeric_limits<int>::min();
     double _compression_ratio = NO_COMPRESSION_RATIO;
     std::set<int> _ancestors;
-    streaming_histogram _estimated_tombstone_drop_time{TOMBSTONE_HISTOGRAM_BIN_SIZE};
+    utils::streaming_histogram _estimated_tombstone_drop_time{TOMBSTONE_HISTOGRAM_BIN_SIZE};
     int _sstable_level = 0;
-    std::vector<bytes> _min_column_names;
-    std::vector<bytes> _max_column_names;
+    std::vector<bytes_opt> _min_column_names;
+    std::vector<bytes_opt> _max_column_names;
     bool _has_legacy_counter_shards = false;
 
     /**
@@ -226,10 +222,14 @@ private:
     /*
      * Convert a vector of bytes into a disk array of disk_string<uint16_t>.
      */
-    static void convert(disk_array<uint32_t, disk_string<uint16_t>>&to, std::vector<bytes>&& from) {
-        to.elements.resize(from.size());
+    static void convert(disk_array<uint32_t, disk_string<uint16_t>>&to, std::vector<bytes_opt>&& from) {
         for (auto i = 0U; i < from.size(); i++) {
-            to.elements[i].value = std::move(from[i]);
+            if (!from[i]) {
+                break;
+            }
+            disk_string<uint16_t> s;
+            s.value = std::move(from[i].value());
+            to.elements.push_back(std::move(s));
         }
     }
 public:
@@ -246,7 +246,7 @@ public:
         _estimated_column_count.add(column_count);
     }
 
-    void merge_tombstone_histogram(streaming_histogram& histogram) {
+    void merge_tombstone_histogram(utils::streaming_histogram& histogram) {
         _estimated_tombstone_drop_time.merge(histogram);
     }
 
@@ -286,40 +286,34 @@ public:
         _sstable_level = sstable_level;
     }
 
-    void update_min_column_names(std::vector<bytes>&& min_column_names) {
-        if (min_column_names.size() > 0) {
-            column_name_helper::merge_min_components(_min_column_names, std::move(min_column_names));
-        }
+    std::vector<bytes_opt>& min_column_names() {
+        return _min_column_names;
     }
 
-    void update_max_column_names(std::vector<bytes>&& max_column_names) {
-        if (max_column_names.size() > 0) {
-            column_name_helper::merge_max_components(_max_column_names, std::move(max_column_names));
-        }
+    std::vector<bytes_opt>& max_column_names() {
+        return _max_column_names;
     }
 
     void update_has_legacy_counter_shards(bool has_legacy_counter_shards) {
         _has_legacy_counter_shards = _has_legacy_counter_shards || has_legacy_counter_shards;
     }
 
-    void update(column_stats&& stats) {
+    void update(const schema& s, column_stats&& stats) {
         update_min_timestamp(stats.min_timestamp.get());
         update_max_timestamp(stats.max_timestamp.get());
         update_max_local_deletion_time(stats.max_local_deletion_time.get());
         add_row_size(stats.row_size);
         add_column_count(stats.column_count);
         merge_tombstone_histogram(stats.tombstone_histogram);
-        update_min_column_names(std::move(stats.min_column_names));
-        update_max_column_names(std::move(stats.max_column_names));
         update_has_legacy_counter_shards(stats.has_legacy_counter_shards);
     }
 
     void construct_compaction(compaction_metadata& m) {
         if (!_ancestors.empty()) {
-            m.ancestors.elements = std::deque<uint32_t>(_ancestors.begin(), _ancestors.end());
+            m.ancestors.elements = utils::chunked_vector<uint32_t>(_ancestors.begin(), _ancestors.end());
         }
         auto cardinality = _cardinality.get_bytes();
-        m.cardinality.elements = std::deque<uint8_t>(cardinality.get(), cardinality.get() + cardinality.size());
+        m.cardinality.elements = utils::chunked_vector<uint8_t>(cardinality.get(), cardinality.get() + cardinality.size());
     }
 
     void construct_stats(stats_metadata& m) {

@@ -43,9 +43,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 #pragma once
@@ -62,6 +62,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <algorithm>
+#include <seastar/core/byteorder.hh>
 #if 0
 #include "murmur3.h"
 #endif
@@ -111,7 +112,7 @@ public:
      *
      * @exception std::invalid_argument the argument is out of range.
      */
-    HyperLogLog(uint8_t b = 4) throw (std::invalid_argument) :
+    HyperLogLog(uint8_t b = 4) :
             b_(b), m_(1 << b), M_(m_, 0) {
 
         if (b < 4 || 16 < b) {
@@ -191,7 +192,7 @@ public:
         temporary_buffer<uint8_t> bytes(s);
         size_t offset = 0;
         // write version
-        *unaligned_cast<int*>(bytes.get_write() + offset) = htonl(-version);
+        write_be<int32_t>(reinterpret_cast<char*>(bytes.get_write() + offset), -version);
         offset += sizeof(int);
 
         // write register width
@@ -249,7 +250,7 @@ public:
      *
      * @exception std::invalid_argument number of registers doesn't match.
      */
-    void merge(const HyperLogLog& other) throw (std::invalid_argument) {
+    void merge(const HyperLogLog& other) {
         if (m_ != other.m_) {
             std::stringstream ss;
             ss << "number of registers doesn't match: " << m_ << " != " << other.m_;
@@ -297,7 +298,7 @@ public:
      *
      * @exception std::runtime_error When failed to dump.
      */
-    void dump(std::ostream& os) const throw(std::runtime_error){
+    void dump(std::ostream& os) const {
         os.write((char*)&b_, sizeof(b_));
         os.write((char*)&M_[0], sizeof(M_[0]) * M_.size());
         if(os.fail()){
@@ -312,7 +313,7 @@ public:
      *
      * @exception std::runtime_error When failed to restore.
      */
-    void restore(std::istream& is) throw(std::runtime_error){
+    void restore(std::istream& is) {
         uint8_t b = 0;
         is.read((char*)&b, sizeof(b));
         HyperLogLog tempHLL(b);

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2014 Cloudius Systems
+ * Copyright (C) 2014 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -43,7 +43,7 @@
 
 #include "types.hh"
 #include <vector>
-#include <iostream>
+#include <iosfwd>
 #include <boost/functional/hash.hpp>
 
 namespace cql3 {
@@ -88,6 +88,10 @@ public:
 
     virtual bool has_reference_to(function& f) override {
         return false;
+    }
+
+    virtual sstring column_name(const std::vector<sstring>& column_names) override {
+        return sprint("%s(%s)", _name, join(", ", column_names));
     }
 
     virtual void print(std::ostream& os) const override;

@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -64,38 +64,6 @@ public:
         , total_size(_total_size) {
     }
     friend std::ostream& operator<<(std::ostream& os, const stream_summary& r);
-#if 0
-    @Override
-    public boolean equals(Object o)
-    {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        StreamSummary summary = (StreamSummary) o;
-        return files == summary.files && totalSize == summary.totalSize && cfId.equals(summary.cfId);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hashCode(cfId, files, totalSize);
-    }
-
-    @Override
-    public String toString()
-    {
-        final StringBuilder sb = new StringBuilder("StreamSummary{");
-        sb.append("path=").append(cfId);
-        sb.append(", files=").append(files);
-        sb.append(", totalSize=").append(totalSize);
-        sb.append('}');
-        return sb.toString();
-    }
-
-#endif
-public:
-    void serialize(bytes::iterator& out) const;
-    static stream_summary deserialize(bytes_view& v);
-    size_t serialized_size() const;
 };
 
 } // namespace streaming

@@ -16,9 +16,9 @@
  * limitations under the License.
  */
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -72,7 +72,7 @@ std::vector<::shared_ptr<cql3::column_specification>> cql3::token_relation::to_r
         throw exceptions::invalid_request_exception(
                 sprint(
                         "The token function arguments must be in the partition key order: %s",
-                        ::to_string(column_defs)));
+                        std::to_string(column_defs)));
     }
     //auto* c = column_defs.front();
     return {::make_shared<column_specification>(schema->ks_name(), schema->cf_name(),
@@ -128,4 +128,11 @@ sstring cql3::token_relation::to_string() const {
     auto term = raw->prepare(db, keyspace, receivers.front());
     term->collect_marker_specification(bound_names);
     return term;
+}
+
+::shared_ptr<cql3::relation> cql3::token_relation::maybe_rename_identifier(const cql3::column_identifier::raw& from, cql3::column_identifier::raw to) {
+    auto new_entities = boost::copy_range<decltype(_entities)>(_entities | boost::adaptors::transformed([&] (auto&& entity) {
+        return *entity == from ? ::make_shared<column_identifier::raw>(to) : entity;
+    }));
+    return ::make_shared<token_relation>(std::move(new_entities), _relation_type, _value);
 }

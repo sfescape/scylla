@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
  */
 
@@ -23,15 +23,20 @@
 #pragma once
 
 #include <boost/program_options.hpp>
+#include <boost/filesystem.hpp>
 #include <unordered_map>
-#include "core/sstring.hh"
-#include "core/future.hh"
 
-class file;
+#include <seastar/core/sstring.hh>
+#include <seastar/core/future.hh>
+#include <seastar/util/program-options.hh>
+#include <seastar/util/log.hh>
+
+#include "seastarx.hh"
+#include "utils/config_file.hh"
+
+namespace seastar { class file; struct logging_settings; }
 
 namespace db {
-
-typedef std::unordered_map<sstring, sstring> string_map;
 
 /*
  * This type is not use, and probably never will be.
@@ -41,79 +46,34 @@ typedef std::unordered_map<sstring, sstring> string_map;
 struct seed_provider_type {
     seed_provider_type() = default;
     seed_provider_type(sstring n,
-            std::initializer_list<string_map::value_type> opts =
+            std::initializer_list<program_options::string_map::value_type> opts =
                     { })
             : class_name(std::move(n)), parameters(std::move(opts)) {
     }
     sstring class_name;
-    string_map parameters;
+    std::unordered_map<sstring, sstring> parameters;
 };
 
-class config {
+class config : public utils::config_file {
 public:
-    enum class value_status {
-        Used,
-        Unused,
-        Invalid,
-    };
-
-    enum class config_source : uint8_t {
-        None,
-        SettingsFile,
-        CommandLine
-    };
-
-    template<typename T, value_status S>
-    struct value {
-        typedef T type;
-        typedef value<T, S> MyType;
-
-        value(const T& t = T()) : _value(t)
-        {}
-        value_status status() const {
-            return S;
-        }
-        config_source source() const {
-            return _source;
-        }
-        bool is_set() const {
-            return _source > config_source::None;
-        }
-        MyType & operator()(const T& t) {
-            _value = t;
-            return *this;
-        }
-        MyType & operator()(T&& t) {
-            _value = std::move(t);
-            return *this;
-        }
-        const T& operator()() const {
-            return _value;
-        }
-        T& operator()() {
-            return _value;
-        }
-    private:
-        friend class config;
-        T _value = T();
-        config_source _source = config_source::None;
-    };
-
     config();
 
-    boost::program_options::options_description
-    get_options_description();
+    // Throws exception if experimental feature is disabled.
+    void check_experimental(const sstring& what) const;
 
-    boost::program_options::options_description_easy_init&
-    add_options(boost::program_options::options_description_easy_init&);
+    /**
+     * Scans the environment variables for configuration files directory
+     * definition. It's either $SCYLLA_CONF, $SCYLLA_HOME/conf or "conf" if none
+     * of SCYLLA_CONF and SCYLLA_HOME is defined.
+     *
+     * @return path of the directory where configuration files are located
+     *         according the environment variables definitions.
+     */
+    static boost::filesystem::path get_conf_dir();
 
-    void read_from_yaml(const sstring&);
-    void read_from_yaml(const char *);
-    future<> read_from_file(const sstring&);
-    future<> read_from_file(file);
-
-    typedef std::unordered_map<sstring, sstring> string_map;
-    typedef std::vector<sstring> string_list;
+    using string_map = std::unordered_map<sstring, sstring>;
+                    //program_options::string_map;
+    using string_list = std::vector<sstring>;
     using seed_provider_type = db::seed_provider_type;
 
     /*
@@ -131,8 +91,10 @@ public:
      *  member: is the property name -> config member name
      *  type:   is the value type (bool, uint32_t etc)
      *  status: is the current _usage_ of the opt. I.e. if you actually use the value, set it to "Used".
+     *          A value marked "UsedFromSeastar" is a configuration value that is assigned based on a Seastar-defined
+     *          command-line interface option.
      *          Most values are set to "Unused", as in "will probably have an effect eventually".
-     *          Values set to "Invalid" have no meaning/usage in urchin, and should (and will currently)
+     *          Values set to "Invalid" have no meaning/usage in scylla, and should (and will currently)
      *          be signaled to a user providing a config with them, that these settings are pointless.
      *  desc:   documentation.
      *  value...: enumerated valid values if any. Not currently used, but why not...
@@ -146,21 +108,27 @@ public:
      */
 
 #define _make_config_values(val)                \
+    val(background_writer_scheduling_quota, double, 1.0, Used, \
+            "max cpu usage ratio (between 0 and 1) for compaction process. Not intended for setting in normal operations. Setting it to 1 or higher will disable it, recommended operational setting is 0.5." \
+    )   \
+    val(auto_adjust_flush_quota, bool, false, Used, \
+            "true: auto-adjust quota for flush processes. false: put everyone together in the static background writer group - if background writer group is enabled. Not intended for setting in normal operations" \
+    )   \
     /* Initialization properties */             \
     /* The minimal properties needed for configuring a cluster. */  \
-    val(cluster_name, sstring, "Test Cluster", Used,   \
+    val(cluster_name, sstring, "", Used,   \
             "The name of the cluster; used to prevent machines in one logical cluster from joining another. All nodes participating in a cluster must have the same value."   \
     )                                           \
     val(listen_address, sstring, "localhost", Used,     \
-            "The IP address or hostname that Cassandra binds to for connecting to other Cassandra nodes. Set this parameter or listen_interface, not both. You must change the default setting for multiple nodes to communicate:\n"    \
+            "The IP address or hostname that Scylla binds to for connecting to other Scylla nodes. Set this parameter or listen_interface, not both. You must change the default setting for multiple nodes to communicate:\n"    \
             "\n"    \
-            "Generally set to empty. If the node is properly configured (host name, name resolution, and so on), Cassandra uses InetAddress.getLocalHost() to get the local address from the system.\n" \
+            "Generally set to empty. If the node is properly configured (host name, name resolution, and so on), Scylla uses InetAddress.getLocalHost() to get the local address from the system.\n" \
             "For a single node cluster, you can use the default setting (localhost).\n" \
-            "If Cassandra can't find the correct address, you must specify the IP address or host name.\n"  \
+            "If Scylla can't find the correct address, you must specify the IP address or host name.\n"  \
             "Never specify 0.0.0.0; it is always wrong."  \
     )                                                   \
     val(listen_interface, sstring, "eth0", Unused,  \
-            "The interface that Cassandra binds to for connecting to other Cassandra nodes. Interfaces must correspond to a single address, IP aliasing is not supported. See listen_address."  \
+            "The interface that Scylla binds to for connecting to other Scylla nodes. Interfaces must correspond to a single address, IP aliasing is not supported. See listen_address."  \
     )   \
     /* Default directories */   \
     /* If you have changed any of the default directories during installation, make sure you have root access and set these properties: */  \
@@ -174,7 +142,7 @@ public:
             "The directory location where table key and row caches are stored."  \
     )                                                   \
     /* Commonly used properties */  \
-    /* Properties most frequently used when configuring Cassandra. */   \
+    /* Properties most frequently used when configuring Scylla. */   \
     /* Before starting a node for the first time, you should carefully evaluate your requirements. */   \
     /* Common initialization properties */  \
     /* Note: Be sure to set the properties in the Quick start section as well. */   \
@@ -188,24 +156,24 @@ public:
             , "die", "stop", "stop_commit", "ignore"    \
     )   \
     val(disk_failure_policy, sstring, "stop", Unused, \
-            "Sets how Cassandra responds to disk failure. Recommend settings are stop or best_effort.\n"    \
+            "Sets how Scylla responds to disk failure. Recommend settings are stop or best_effort.\n"    \
             "\n"    \
             "\tdie              Shut down gossip and Thrift and kill the JVM for any file system errors or single SSTable errors, so the node can be replaced.\n"   \
             "\tstop_paranoid    Shut down gossip and Thrift even for single SSTable errors.\n"    \
             "\tstop             Shut down gossip and Thrift, leaving the node effectively dead, but available for inspection using JMX.\n"    \
             "\tbest_effort      Stop using the failed disk and respond to requests based on the remaining available SSTables. This means you will see obsolete data at consistency level of ONE.\n"    \
-            "\tignore           Ignores fatal errors and lets the requests fail; all file system errors are logged but otherwise ignored. Cassandra acts as in versions prior to 1.2.\n"    \
+            "\tignore           Ignores fatal errors and lets the requests fail; all file system errors are logged but otherwise ignored. Scylla acts as in versions prior to Cassandra 1.2.\n"    \
             "\n"    \
             "Related information: Handling Disk Failures In Cassandra 1.2 blog and Recovering from a single disk failure using JBOD.\n"    \
             , "die", "stop_paranoid", "stop", "best_effort", "ignore"   \
     )   \
     val(endpoint_snitch, sstring, "org.apache.cassandra.locator.SimpleSnitch", Used,  \
-            "Set to a class that implements the IEndpointSnitch. Cassandra uses snitches for locating nodes and routing requests.\n\n"    \
+            "Set to a class that implements the IEndpointSnitch. Scylla uses snitches for locating nodes and routing requests.\n\n"    \
             "\tSimpleSnitch: Use for single-data center deployments or single-zone in public clouds. Does not recognize data center or rack information. It treats strategy order as proximity, which can improve cache locality when disabling read repair.\n\n"    \
             "\tGossipingPropertyFileSnitch: Recommended for production. The rack and data center for the local node are defined in the cassandra-rackdc.properties file and propagated to other nodes via gossip. To allow migration from the PropertyFileSnitch, it uses the cassandra-topology.properties file if it is present.\n\n"    \
             /*"\tPropertyFileSnitch: Determines proximity by rack and data center, which are explicitly configured in the cassandra-topology.properties file.\n\n"    */\
             /*"\tEc2Snitch: For EC2 deployments in a single region. Loads region and availability zone information from the EC2 API. The region is treated as the data center and the availability zone as the rack. Uses only private IPs. Subsequently it does not work across multiple regions.\n\n"    */\
-            /*"\tEc2MultiRegionSnitch: Uses public IPs as the broadcast_address to allow cross-region connectivity. This means you must also set seed addresses to the public IP and open the storage_port or ssl_storage_port on the public IP firewall. For intra-region traffic, Cassandra switches to the private IP after establishing a connection.\n\n"    */\
+            /*"\tEc2MultiRegionSnitch: Uses public IPs as the broadcast_address to allow cross-region connectivity. This means you must also set seed addresses to the public IP and open the storage_port or ssl_storage_port on the public IP firewall. For intra-region traffic, Scylla switches to the private IP after establishing a connection.\n\n"    */\
             "\tRackInferringSnitch: Proximity is determined by rack and data center, which are assumed to correspond to the 3rd and 2nd octet of each node's IP address, respectively. This snitch is best used as an example for writing a custom snitch class (unless this happens to match your deployment conventions).\n" \
             "\n"    \
             "Related information: Snitches\n"    \
@@ -223,10 +191,10 @@ public:
             "The listen address for client connections. Interfaces must correspond to a single address, IP aliasing is not supported. See rpc_address." \
     )   \
     val(seed_provider, seed_provider_type, seed_provider_type("org.apache.cassandra.locator.SimpleSeedProvider"), Used, \
-            "The addresses of hosts deemed contact points. Cassandra nodes use the -seeds list to find each other and learn the topology of the ring.\n"    \
+            "The addresses of hosts deemed contact points. Scylla nodes use the -seeds list to find each other and learn the topology of the ring.\n"    \
             "\n"    \
             "  class_name (Default: org.apache.cassandra.locator.SimpleSeedProvider)\n" \
-            "  \tThe class within Cassandra that handles the seed logic. It can be customized, but this is typically not required.\n"   \
+            "  \tThe class within Scylla that handles the seed logic. It can be customized, but this is typically not required.\n"   \
             "  \t- seeds (Default: 127.0.0.1)    A comma-delimited list of IP addresses used by gossip for bootstrapping new nodes joining a cluster. When running multiple nodes, you must change the list from the default value. In multiple data-center clusters, the seed list should include at least one node from each data center (replication group). More than a single seed node per data center is recommended for fault tolerance. Otherwise, gossip has to communicate with another data center when bootstrapping a node. Making every node a seed node is not recommended because of increased maintenance and reduced gossip performance. Gossip optimization is not critical, but it is recommended to use a small seed list (approximately three nodes per data center).\n"    \
             "\n"    \
             "Related information: Initializing a multiple node cluster (single data center) and Initializing a multiple node cluster (multiple data centers)."  \
@@ -240,7 +208,7 @@ public:
             "Log a warning when compacting partitions larger than this value"   \
     )                                               \
     /* Common memtable settings */  \
-    val(memtable_total_space_in_mb, uint32_t, 0, Used,     \
+    val(memtable_total_space_in_mb, uint32_t, 0, Invalid,     \
             "Specifies the total memory used for all memtables on a node. This replaces the per-table storage settings memtable_operations_in_millions and memtable_throughput_in_mb."  \
     )                                                   \
     /* Common disk settings */  \
@@ -254,8 +222,8 @@ public:
             "Counter writes read the current values before incrementing and writing them back. The recommended value is (16 × number_of_drives) ."  \
     )                                                   \
     /* Common automatic backup settings */  \
-    val(incremental_backups, bool, false, Unused,     \
-            "Backs up data updated since the last snapshot was taken. When enabled, Cassandra creates a hard link to each SSTable flushed or streamed locally in a backups/ subdirectory of the keyspace data. Removing these links is the operator's responsibility.\n"  \
+    val(incremental_backups, bool, false, Used,     \
+            "Backs up data updated since the last snapshot was taken. When enabled, Scylla creates a hard link to each SSTable flushed or streamed locally in a backups/ subdirectory of the keyspace data. Removing these links is the operator's responsibility.\n"  \
             "Related information: Enabling incremental backups" \
     )                                                   \
     val(snapshot_before_compaction, bool, false, Unused,     \
@@ -263,7 +231,7 @@ public:
             "Related information: Configuring compaction"   \
     )                                                   \
     /* Common fault detection setting */    \
-    val(phi_convict_threshold, uint32_t, 8, Unused,     \
+    val(phi_convict_threshold, uint32_t, 8, Used,     \
             "Adjusts the sensitivity of the failure detector on an exponential scale. Generally this setting never needs adjusting.\n"  \
             "Related information: Failure detection and recovery"  \
     )                                                   \
@@ -271,10 +239,10 @@ public:
     /* Tuning performance and system reso   urce utilization, including commit log, compaction, memory, disk I/O, CPU, reads, and writes. */    \
     /* Commit log settings */   \
     val(commitlog_sync, sstring, "periodic", Used,     \
-            "The method that Cassandra uses to acknowledge writes in milliseconds:\n"   \
+            "The method that Scylla uses to acknowledge writes in milliseconds:\n"   \
             "\n"    \
             "\tperiodic : Used with commitlog_sync_period_in_ms (Default: 10000 - 10 seconds ) to control how often the commit log is synchronized to disk. Periodic syncs are acknowledged immediately.\n"   \
-            "\tbatch : Used with commitlog_sync_batch_window_in_ms (Default: disabled **) to control how long Cassandra waits for other writes before performing a sync. When using this method, writes are not acknowledged until fsynced to disk.\n"  \
+            "\tbatch : Used with commitlog_sync_batch_window_in_ms (Default: disabled **) to control how long Scylla waits for other writes before performing a sync. When using this method, writes are not acknowledged until fsynced to disk.\n"  \
             "Related information: Durability"   \
     )                                                   \
     val(commitlog_segment_size_in_mb, uint32_t, 64, Used,     \
@@ -289,8 +257,8 @@ public:
     val(commitlog_sync_batch_window_in_ms, uint32_t, 10000, Used,     \
             "Controls how long the system waits for other writes before performing a sync in \"batch\" mode."    \
     )   \
-    val(commitlog_total_space_in_mb, uint32_t, 8192, Used,     \
-            "Total space used for commitlogs. If the used space goes above this value, Cassandra rounds up to the next nearest segment multiple and flushes memtables to disk for the oldest commitlog segments, removing those log segments. This reduces the amount of data to replay on startup, and prevents infrequently-updated tables from indefinitely keeping commitlog segments. A small total commitlog space tends to cause more flush activity on less-active tables.\n"  \
+    val(commitlog_total_space_in_mb, int64_t, -1, Used,     \
+            "Total space used for commitlogs. If the used space goes above this value, Scylla rounds up to the next nearest segment multiple and flushes memtables to disk for the oldest commitlog segments, removing those log segments. This reduces the amount of data to replay on startup, and prevents infrequently-updated tables from indefinitely keeping commitlog segments. A small total commitlog space tends to cause more flush activity on less-active tables.\n"  \
             "Related information: Configuring memtable throughput"  \
     )                                                   \
     /* Compaction settings */   \
@@ -310,6 +278,7 @@ public:
     val(sstable_preemptive_open_interval_in_mb, uint32_t, 50, Unused,     \
             "When compacting, the replacement opens SSTables before they are completely written and uses in place of the prior SSTables for any range previously written. This setting helps to smoothly transfer reads between the SSTables by reducing page cache churn and keeps hot rows hot."  \
     )                                                   \
+    val(defragment_memory_on_idle, bool, false, Used, "When set to true, will defragment memory when the cpu is idle.  This reduces the amount of work Scylla performs when processing client requests.") \
     /* Memtable settings */ \
     val(memtable_allocation_type, sstring, "heap_buffers", Invalid,     \
             "Specify the way Cassandra allocates and manages memtable memory. See Off-heap memtables in Cassandra 2.1. Options are:\n"  \
@@ -317,7 +286,7 @@ public:
             "\toffheap_buffers  Off heap (direct) NIO buffers.\n"   \
             "\toffheap_objects  Native memory, eliminating NIO buffer heap overhead."   \
     )                                                   \
-    val(memtable_cleanup_threshold, double, .11, Used, \
+    val(memtable_cleanup_threshold, double, .11, Invalid, \
             "Ratio of occupied non-flushing memtable size to total permitted size for triggering a flush of the largest memtable. Larger values mean larger flushes and less compaction, but also less concurrent flush activity, which can make it difficult to keep your disks saturated under heavy write load." \
     )   \
     val(file_cache_size_in_mb, uint32_t, 512, Unused,  \
@@ -337,7 +306,7 @@ public:
             "See memtable_heap_space_in_mb"  \
     )   \
     /* Cache and index settings */  \
-    val(column_index_size_in_kb, uint32_t, 64, Unused,     \
+    val(column_index_size_in_kb, uint32_t, 64, Used,     \
             "Granularity of the index of rows within a partition. For huge rows, decrease this setting to improve seek time. If you use key cache, be careful not to make this setting too large because key cache will be overwhelmed. If you're unsure of the size of the rows, it's best to use the default setting."  \
     )   \
     val(index_summary_capacity_in_mb, uint32_t, 0, Unused,     \
@@ -372,26 +341,31 @@ public:
             "This setting has been removed from default configuration. It makes new (non-seed) nodes automatically migrate the right data to themselves. When initializing a fresh cluster with no data, add auto_bootstrap: false.\n"  \
             "Related information: Initializing a multiple node cluster (single data center) and Initializing a multiple node cluster (multiple data centers)."  \
     )   \
-    val(batch_size_warn_threshold_in_kb, uint32_t, 5, Unused,     \
+    val(batch_size_warn_threshold_in_kb, uint32_t, 5, Used,     \
             "Log WARN on any batch size exceeding this value in kilobytes. Caution should be taken on increasing the size of this threshold as it can lead to node instability."  \
     )   \
-    val(broadcast_address, sstring, /* listen_address */, Unused, \
-            "The IP address a node tells other nodes in the cluster to contact it by. It allows public and private address to be different. For example, use the broadcast_address parameter in topologies where not all nodes have access to other nodes by their private IP addresses.\n" \
-            "If your Cassandra cluster is deployed across multiple Amazon EC2 regions and you use the EC2MultiRegionSnitch , set the broadcast_address to public IP address of the node and the listen_address to the private IP."    \
+    val(batch_size_fail_threshold_in_kb, uint32_t, 50, Used,     \
+            "Fail any multiple-partition batch exceeding this value. 50kb (10x warn threshold) by default." \
     )   \
-    val(initial_token, sstring, /* N/A */, Unused,     \
+    val(broadcast_address, sstring, /* listen_address */, Used, \
+            "The IP address a node tells other nodes in the cluster to contact it by. It allows public and private address to be different. For example, use the broadcast_address parameter in topologies where not all nodes have access to other nodes by their private IP addresses.\n" \
+            "If your Scylla cluster is deployed across multiple Amazon EC2 regions and you use the EC2MultiRegionSnitch , set the broadcast_address to public IP address of the node and the listen_address to the private IP."    \
+    )   \
+    val(listen_on_broadcast_address, bool, false, Used, "When using multiple physical network interfaces, set this to true to listen on broadcast_address in addition to the listen_address, allowing nodes to communicate in both interfaces.  Ignore this property if the network configuration automatically routes between the public and private networks such as EC2." \
+        )\
+    val(initial_token, sstring, /* N/A */, Used,     \
             "Used in the single-node-per-token architecture, where a node owns exactly one contiguous range in the ring space. Setting this property overrides num_tokens.\n"   \
             "If you not using vnodes or have num_tokens set it to 1 or unspecified (#num_tokens), you should always specify this parameter when setting up a production cluster for the first time and when adding capacity. For more information, see this parameter in the Cassandra 1.1 Node and Cluster Configuration documentation.\n" \
             "This parameter can be used with num_tokens (vnodes ) in special cases such as Restoring from a snapshot." \
     )   \
     val(num_tokens, uint32_t, 1, Used,                \
-            "Defines the number of tokens randomly assigned to this node on the ring when using virtual nodes (vnodes). The more tokens, relative to other nodes, the larger the proportion of data that the node stores. Generally all nodes should have the same number of tokens assuming equal hardware capability. The recommended value is 256. If unspecified (#num_tokens), Cassandra uses 1 (equivalent to #num_tokens : 1) for legacy compatibility and uses the initial_token setting.\n"    \
+            "Defines the number of tokens randomly assigned to this node on the ring when using virtual nodes (vnodes). The more tokens, relative to other nodes, the larger the proportion of data that the node stores. Generally all nodes should have the same number of tokens assuming equal hardware capability. The recommended value is 256. If unspecified (#num_tokens), Scylla uses 1 (equivalent to #num_tokens : 1) for legacy compatibility and uses the initial_token setting.\n"    \
             "If not using vnodes, comment #num_tokens : 256 or set num_tokens : 1 and use initial_token. If you already have an existing cluster with one token per node and wish to migrate to vnodes, see Enabling virtual nodes on an existing production cluster.\n"    \
             "Note: If using DataStax Enterprise, the default setting of this property depends on the type of node and type of install."  \
     )   \
-    val(partitioner, sstring, "org.apache.cassandra.dht.Murmur3Partitioner", Unused,                \
+    val(partitioner, sstring, "org.apache.cassandra.dht.Murmur3Partitioner", Used,                \
             "Distributes rows (by partition key) across all nodes in the cluster. Any IPartitioner may be used, including your own as long as it is in the class path. For new clusters use the default partitioner.\n" \
-            "Cassandra provides the following partitioners for backwards compatibility:\n"  \
+            "Scylla provides the following partitioners for backwards compatibility:\n"  \
             "\n"    \
             "\tRandomPartitioner\n" \
             "\tByteOrderedPartitioner\n"    \
@@ -403,11 +377,11 @@ public:
             , "org.apache.cassandra.dht.ByteOrderedPartitioner" \
             , "org.apache.cassandra.dht.OrderPreservingPartitioner" \
     )                                                   \
-    val(storage_port, uint16_t, 7000, Unused,                \
+    val(storage_port, uint16_t, 7000, Used,                \
             "The port for inter-node communication."  \
     )                                                   \
     /* Advanced automatic backup setting */ \
-    val(auto_snapshot, bool, true, Unused,     \
+    val(auto_snapshot, bool, true, Used,     \
             "Enable or disable whether a snapshot is taken of the data before keyspace truncation or dropping of tables. To prevent data loss, using the default setting is strongly advised. If you set to false, you will lose data on truncation or drop."  \
     )   \
     /* Key caches and global row properties */  \
@@ -467,13 +441,13 @@ public:
     val(read_request_timeout_in_ms, uint32_t, 5000, Used,     \
             "The time that the coordinator waits for read operations to complete"  \
     )   \
-    val(counter_write_request_timeout_in_ms, uint32_t, 5000, Unused,     \
+    val(counter_write_request_timeout_in_ms, uint32_t, 5000, Used,     \
             "The time that the coordinator waits for counter writes to complete."  \
     )   \
     val(cas_contention_timeout_in_ms, uint32_t, 5000, Unused,     \
             "The time that the coordinator continues to retry a CAS (compare and set) operation that contends with other proposals for the same row."  \
     )   \
-    val(truncate_request_timeout_in_ms, uint32_t, 10000, Unused,     \
+    val(truncate_request_timeout_in_ms, uint32_t, 10000, Used,     \
             "The time that the coordinator waits for truncates (remove all data from a table) to complete. The long default value allows for a snapshot to be taken before removing the data. If auto_snapshot is disabled (not recommended), you can reduce this time."  \
     )   \
     val(write_request_timeout_in_ms, uint32_t, 2000, Used,     \
@@ -502,14 +476,14 @@ public:
     val(internode_recv_buff_size_in_bytes, uint32_t, 0, Unused,     \
             "Sets the receiving socket buffer size in bytes for inter-node calls."  \
     )   \
-    val(internode_compression, sstring, "all", Unused,     \
+    val(internode_compression, sstring, "none", Used,     \
             "Controls whether traffic between nodes is compressed. The valid values are:\n" \
             "\n"    \
             "\tall: All traffic is compressed.\n"   \
             "\tdc : Traffic between data centers is compressed.\n"  \
             "\tnone : No compression."  \
     )   \
-    val(inter_dc_tcp_nodelay, bool, false, Unused,     \
+    val(inter_dc_tcp_nodelay, bool, false, Used,     \
             "Enable or disable tcp_nodelay for inter-data center communication. When disabled larger, but fewer, network packets are sent. This reduces overhead from the TCP protocol itself. However, if cross data-center responses are blocked, it will increase latency."  \
     )   \
     val(streaming_socket_timeout_in_ms, uint32_t, 0, Unused,     \
@@ -522,6 +496,13 @@ public:
     val(native_transport_port, uint16_t, 9042, Used,                \
             "Port on which the CQL native transport listens for clients."  \
     )   \
+    val(native_transport_port_ssl, uint16_t, 9142, Used,                \
+            "Port on which the CQL TLS native transport listens for clients."  \
+            "Enabling client encryption and keeping native_transport_port_ssl disabled will use encryption" \
+            "for native_transport_port. Setting native_transport_port_ssl to a different value" \
+            "from native_transport_port will use encryption for native_transport_port_ssl while"    \
+            "keeping native_transport_port unencrypted" \
+    )   \
     val(native_transport_max_threads, uint32_t, 128, Invalid,                \
             "The maximum number of thread handling requests. The meaning is the same as rpc_max_threads.\n"  \
             "Default is different (128 versus unlimited).\n"  \
@@ -533,16 +514,16 @@ public:
     )   \
     /* RPC (remote procedure call) settings */  \
     /* Settings for configuring and tuning client connections. */   \
-    val(broadcast_rpc_address, sstring, /* unset */, Unused,    \
-            "RPC address to broadcast to drivers and other Cassandra nodes. This cannot be set to 0.0.0.0. If blank, it is set to the value of the rpc_address or rpc_interface. If rpc_address or rpc_interfaceis set to 0.0.0.0, this property must be set.\n"    \
+    val(broadcast_rpc_address, sstring, /* unset */, Used,    \
+            "RPC address to broadcast to drivers and other Scylla nodes. This cannot be set to 0.0.0.0. If blank, it is set to the value of the rpc_address or rpc_interface. If rpc_address or rpc_interfaceis set to 0.0.0.0, this property must be set.\n"    \
     )   \
     val(rpc_port, uint16_t, 9160, Used,                \
             "Thrift port for client connections."  \
     )   \
-    val(start_rpc, bool, false, Used,                \
+    val(start_rpc, bool, true, Used,                \
             "Starts the Thrift RPC server"  \
     )   \
-    val(rpc_keepalive, bool, true, Unused,     \
+    val(rpc_keepalive, bool, true, Used,     \
             "Enable or disable keepalive on client connections (RPC or native)."  \
     )   \
     val(rpc_max_threads, uint32_t, 0, Invalid,     \
@@ -565,6 +546,9 @@ public:
             "\t         Note: When selecting this option, you must change the default value (unlimited) of rpc_max_threads.\n"   \
             "\tYour own RPC server: You must provide a fully-qualified class name of an o.a.c.t.TServerFactory that can create a server instance."  \
     )   \
+    val(cache_hit_rate_read_balancing, bool, true, Used, \
+            "This boolean controls whether the replicas for read query will be choosen based on cache hit ratio"\
+    ) \
     /* Advanced fault detection settings */ \
     /* Settings to handle poorly performing or failing nodes. */    \
     val(dynamic_snitch_badness_threshold, double, 0, Unused,     \
@@ -618,7 +602,7 @@ public:
             "\tweights: (Default: Keyspace: 1)  Takes a list of keyspaces. It sets how many requests are handled during each turn of the RoundRobin, based on the request_scheduler_id."  \
     )   \
     /* Thrift interface properties */   \
-    /* Legacy API for older clients. CQL is a simpler and better API for Cassandra. */  \
+    /* Legacy API for older clients. CQL is a simpler and better API for Scylla. */  \
     val(thrift_framed_transport_size_in_mb, uint32_t, 15, Unused,     \
             "Frame size (maximum field length) for Thrift. The frame is the row or part of the row the application is inserting."  \
     )   \
@@ -627,8 +611,8 @@ public:
     )   \
     /* Security properties */   \
     /* Server and client security settings. */  \
-    val(authenticator, sstring, "org.apache.cassandra.auth.AllowAllAuthenticator", Unused,     \
-            "The authentication backend. It implements IAuthenticator, which is used to identify users. The available authenticators are:\n"    \
+    val(authenticator, sstring, "org.apache.cassandra.auth.AllowAllAuthenticator", Used,     \
+            "The authentication backend, used to identify users. The available authenticators are:\n"    \
             "\n"    \
             "\torg.apache.cassandra.auth.AllowAllAuthenticator : Disables authentication; no checks are performed.\n"   \
             "\torg.apache.cassandra.auth.PasswordAuthenticator : Authenticates users with user names and hashed passwords stored in the system_auth.credentials table. If you use the default, 1, and the node with the lone replica goes down, you will not be able to log into the cluster because the system_auth keyspace was not replicated.\n"  \
@@ -639,7 +623,7 @@ public:
     val(internode_authenticator, sstring, "enabled", Unused,     \
             "Internode authentication backend. It implements org.apache.cassandra.auth.AllowAllInternodeAuthenticator to allows or disallow connections from peer nodes."  \
     )   \
-    val(authorizer, sstring, "org.apache.cassandra.auth.AllowAllAuthorizer", Unused,     \
+    val(authorizer, sstring, "org.apache.cassandra.auth.AllowAllAuthorizer", Used,     \
             "The authorization backend. It implements IAuthenticator, which limits access and provides permissions. The available authorizers are:\n"    \
             "\n"    \
             "\tAllowAllAuthorizer : Disables authorization; allows any action to any user.\n"   \
@@ -648,14 +632,23 @@ public:
             , "org.apache.cassandra.auth.AllowAllAuthorizer" \
             , "org.apache.cassandra.auth.CassandraAuthorizer" \
     )   \
-    val(permissions_validity_in_ms, uint32_t, 2000, Unused,     \
-            "How long permissions in cache remain valid. Depending on the authorizer, such as CassandraAuthorizer, fetching permissions can be resource intensive. This setting disabled when set to 0 or when AllowAllAuthorizer is set.\n"  \
+    val(role_manager, sstring, "org.apache.cassandra.auth.CassandraRoleManager", Used,    \
+            "The role-management backend, used to maintain grantts and memberships between roles.\n"    \
+            "The available role-managers are:\n"    \
+            "\tCassandraRoleManager : Stores role data in the system_auth keyspace."    \
+    )   \
+    val(permissions_validity_in_ms, uint32_t, 10000, Used,     \
+            "How long permissions in cache remain valid. Depending on the authorizer, such as CassandraAuthorizer, fetching permissions can be resource intensive. Permissions caching is disabled when this property is set to 0 or when AllowAllAuthorizer is used. The cached value is considered valid as long as both its value is not older than the permissions_validity_in_ms " \
+            "and the cached value has been read at least once during the permissions_validity_in_ms time frame. If any of these two conditions doesn't hold the cached value is going to be evicted from the cache.\n"  \
             "Related information: Object permissions"   \
     )   \
-    val(permissions_update_interval_in_ms, uint32_t, 2000, Unused,     \
-            "Refresh interval for permissions cache (if enabled). After this interval, cache entries become eligible for refresh. On next access, an async reload is scheduled and the old value is returned until it completes. If permissions_validity_in_ms , then this property must benon-zero."   \
+    val(permissions_update_interval_in_ms, uint32_t, 2000, Used,     \
+            "Refresh interval for permissions cache (if enabled). After this interval, cache entries become eligible for refresh. An async reload is scheduled every permissions_update_interval_in_ms time period and the old value is returned until it completes. If permissions_validity_in_ms has a non-zero value, then this property must also have a non-zero value. It's recommended to set this value to be at least 3 times smaller than the permissions_validity_in_ms."   \
     )   \
-    val(server_encryption_options, string_map, /*none*/, Unused,     \
+    val(permissions_cache_max_entries, uint32_t, 1000, Used,    \
+            "Maximum cached permission entries. Must have a non-zero value if permissions caching is enabled (see a permissions_validity_in_ms description)." \
+    )   \
+    val(server_encryption_options, string_map, /*none*/, Used,     \
             "Enable or disable inter-node encryption. You must also generate keys and provide the appropriate key and trust store locations and passwords. No custom encryption options are currently enabled. The available options are:\n"    \
             "\n"    \
             "internode_encryption : (Default: none ) Enable or disable encryption of inter-node communication using the TLS_RSA_WITH_AES_128_CBC_SHA cipher suite for authentication, key exchange, and encryption of data transfers. The available inter-node options are:\n"  \
@@ -663,50 +656,33 @@ public:
             "\tnone : No encryption.\n" \
             "\tdc : Encrypt the traffic between the data centers (server only).\n"  \
             "\track : Encrypt the traffic between the racks(server only).\n"    \
-            "\tkeystore : (Default: conf/.keystore ) The location of a Java keystore (JKS) suitable for use with Java Secure Socket Extension (JSSE), which is the Java version of the Secure Sockets Layer (SSL), and Transport Layer Security (TLS) protocols. The keystore contains the private key used to encrypt outgoing messages.\n"    \
-            "\tkeystore_password : (Default: cassandra ) Password for the keystore.\n"  \
-            "\ttruststore : (Default: conf/.truststore ) Location of the truststore containing the trusted certificate for authenticating remote servers.\n"    \
-            "\ttruststore_password : (Default: cassandra ) Password for the truststore.\n"  \
-            "\n"    \
-            "The passwords used in these options must match the passwords used when generating the keystore and truststore. For instructions on generating these files, see Creating a Keystore to Use with JSSE.\n"   \
+            "certificate : (Default: conf/scylla.crt) The location of a PEM-encoded x509 certificate used to identify and encrypt the internode communication.\n"    \
+            "keyfile : (Default: conf/scylla.key) PEM Key file associated with certificate.\n"  \
+            "truststore : (Default: <system truststore> ) Location of the truststore containing the trusted certificate for authenticating remote servers.\n"    \
             "\n"    \
             "The advanced settings are:\n"  \
             "\n"    \
-            "\tprotocol : (Default: TLS )\n"    \
-            "\talgorithm : (Default: SunX509 )\n"   \
-            "\tstore_type : (Default: JKS )\n"  \
-            "\tcipher_suites : (Default: TLS_RSA_WITH_AES_128_CBC_SHA , TLS_RSA_WITH_AES_256_CBC_SHA )\n"   \
+            "\tpriority_string : GnuTLS priority string controlling TLS algorithms used/allowed.\n"   \
             "\trequire_client_auth : (Default: false ) Enables or disables certificate authentication.\n" \
             "Related information: Node-to-node encryption"  \
     )   \
-    val(client_encryption_options, string_map, /*none*/, Unused,     \
-            "Enable or disable client-to-node encryption. You must also generate keys and provide the appropriate key and trust store locations and passwords. No custom encryption options are currently enabled. The available options are:\n"    \
+    val(client_encryption_options, string_map, /*none*/, Used,     \
+            "Enable or disable client-to-node encryption. You must also generate keys and provide the appropriate key and certificate. No custom encryption options are currently enabled. The available options are:\n"    \
             "\n"    \
             "\tenabled : (Default: false ) To enable, set to true.\n"    \
-            "\tkeystore : (Default: conf/.keystore ) The location of a Java keystore (JKS) suitable for use with Java Secure Socket Extension (JSSE), which is the Java version of the Secure Sockets Layer (SSL), and Transport Layer Security (TLS) protocols. The keystore contains the private key used to encrypt outgoing messages.\n"    \
-            "\tkeystore_password : (Default: cassandra ) Password for the keystore. This must match the password used when generating the keystore and truststore.\n"    \
-            "\trequire_client_auth : (Default: false ) Enables or disables certificate authentication. (Available starting with Cassandra 1.2.3.)\n"    \
-            "\ttruststore : (Default: conf/.truststore ) Set if require_client_auth is true.\n"    \
-            "\ttruststore_password : <truststore_password> Set if require_client_auth is true.\n"    \
+            "\tcertificate: (Default: conf/scylla.crt) The location of a PEM-encoded x509 certificate used to identify and encrypt the client/server communication.\n"   \
+            "\tkeyfile: (Default: conf/scylla.key) PEM Key file associated with certificate.\n"   \
+            "truststore : (Default: <system truststore> ) Location of the truststore containing the trusted certificate for authenticating remote servers.\n"    \
             "\n"    \
-            "The advanced settings are:\n"    \
+            "The advanced settings are:\n"  \
             "\n"    \
-            "\tprotocol : (Default: TLS )\n"    \
-            "\talgorithm : (Default: SunX509 )\n"    \
-            "\tstore_type : (Default: JKS )\n"    \
-            "\tcipher_suites : (Default: TLS_RSA_WITH_AES_128_CBC_SHA , TLS_RSA_WITH_AES_256_CBC_SHA )\n"  \
+            "\tpriority_string : GnuTLS priority string controlling TLS algorithms used/allowed.\n"   \
+            "\trequire_client_auth : (Default: false ) Enables or disables certificate authentication.\n" \
             "Related information: Client-to-node encryption"    \
     )   \
-    val(ssl_storage_port, uint32_t, 7001, Unused,     \
+    val(ssl_storage_port, uint32_t, 7001, Used,     \
             "The SSL port for encrypted communication. Unused unless enabled in encryption_options."  \
     )                                                   \
-    val(default_log_level, sstring, "warn", Used, \
-            "Default log level for log messages.  Valid values are trace, debug, info, warn, error.") \
-    val(logger_log_level, string_map, /* none */, Used,\
-            "map of logger name to log level.  Valid values are trace, debug, info, warn, error.  " \
-            "Use --help-loggers for a list of logger names") \
-    val(log_to_stdout, bool, true, Used, "Send log output to stdout") \
-    val(log_to_syslog, bool, false, Used, "Send log output to syslog") \
     val(enable_in_memory_data_store, bool, false, Used, "Enable in memory mode (system tables are always persisted)") \
     val(enable_cache, bool, true, Used, "Enable cache") \
     val(enable_commitlog, bool, true, Used, "Enable commitlog") \
@@ -715,21 +691,67 @@ public:
     val(api_address, sstring, "", Used, "Http Rest API address") \
     val(api_ui_dir, sstring, "swagger-ui/dist/", Used, "The directory location of the API GUI") \
     val(api_doc_dir, sstring, "api/api-doc/", Used, "The API definition file directory") \
+    val(load_balance, sstring, "none", Used, "CQL request load balancing: 'none' or round-robin'") \
+    val(consistent_rangemovement, bool, true, Used, "When set to true, range movements will be consistent. It means: 1) it will refuse to bootstrap a new node if other bootstrapping/leaving/moving nodes detected. 2) data will be streamed to a new node only from the node which is no longer responsible for the token range. Same as -Dcassandra.consistent.rangemovement in cassandra") \
+    val(join_ring, bool, true, Used, "When set to true, a node will join the token ring. When set to false, a node will not join the token ring. User can use nodetool join to initiate ring joinging later. Same as -Dcassandra.join_ring in cassandra.") \
+    val(load_ring_state, bool, true, Used, "When set to true, load tokens and host_ids previously saved. Same as -Dcassandra.load_ring_state in cassandra.") \
+    val(replace_node, sstring, "", Used, "The UUID of the node to replace. Same as -Dcassandra.replace_node in cssandra.") \
+    val(replace_token, sstring, "", Used, "The tokens of the node to replace. Same as -Dcassandra.replace_token in cassandra.") \
+    val(replace_address, sstring, "", Used, "The listen_address or broadcast_address of the dead node to replace. Same as -Dcassandra.replace_address.") \
+    val(replace_address_first_boot, sstring, "", Used, "Like replace_address option, but if the node has been bootstrapped successfully it will be ignored. Same as -Dcassandra.replace_address_first_boot.") \
+    val(override_decommission, bool, false, Used, "Set true to force a decommissioned node to join the cluster") \
+    val(ring_delay_ms, uint32_t, 30 * 1000, Used, "Time a node waits to hear from other nodes before joining the ring in milliseconds. Same as -Dcassandra.ring_delay_ms in cassandra.") \
+    val(shadow_round_ms, uint32_t, 300 * 1000, Used, "The maximum gossip shadow round time. Can be used to reduce the gossip feature check time during node boot up.") \
+    val(fd_max_interval_ms, uint32_t, 2 * 1000, Used, "The maximum failure_detector interval time in milliseconds. Interval larger than the maximum will be ignored. Larger cluster may need to increase the default.") \
+    val(fd_initial_value_ms, uint32_t, 2 * 1000, Used, "The initial failure_detector interval time in milliseconds.") \
+    val(shutdown_announce_in_ms, uint32_t, 2 * 1000, Used, "Time a node waits after sending gossip shutdown message in milliseconds. Same as -Dcassandra.shutdown_announce_in_ms in cassandra.") \
+    val(developer_mode, bool, false, Used, "Relax environment checks. Setting to true can reduce performance and reliability significantly.") \
+    val(skip_wait_for_gossip_to_settle, int32_t, -1, Used, "An integer to configure the wait for gossip to settle. -1: wait normally, 0: do not wait at all, n: wait for at most n polls. Same as -Dcassandra.skip_wait_for_gossip_to_settle in cassandra.") \
+    val(experimental, bool, false, Used, "Set to true to unlock experimental features.") \
+    val(lsa_reclamation_step, size_t, 1, Used, "Minimum number of segments to reclaim in a single step") \
+    val(prometheus_port, uint16_t, 9180, Used, "Prometheus port, set to zero to disable") \
+    val(prometheus_address, sstring, "0.0.0.0", Used, "Prometheus listening address") \
+    val(prometheus_prefix, sstring, "scylla", Used, "Set the prefix of the exported Prometheus metrics. Changing this will break Scylla's dashboard compatibility, do not change unless you know what you are doing.") \
+    val(abort_on_lsa_bad_alloc, bool, false, Used, "Abort when allocation in LSA region fails") \
+    val(murmur3_partitioner_ignore_msb_bits, unsigned, 0, Used, "Number of most siginificant token bits to ignore in murmur3 partitioner; increase for very large clusters") \
+    val(virtual_dirty_soft_limit, double, 0.6, Used, "Soft limit of virtual dirty memory expressed as a portion of the hard limit") \
+    val(sstable_summary_ratio, double, 0.0005, Used, "Enforces that 1 byte of summary is written for every N (2000 by default) " \
+        "bytes written to data file. Value must be between 0 and 1.") \
+    val(large_memory_allocation_warning_threshold, size_t, size_t(1) << 20, Used, "Warn about memory allocations above this size; set to zero to disable") \
+    val(enable_deprecated_partitioners, bool, false, Used, "Enable the byteordered and murmurs partitioners. These partitioners are deprecated and will be removed in a future version.") \
+    val(enable_keyspace_column_family_metrics, bool, false, Used, "Enable per keyspace and per column family metrics reporting") \
+    val(enable_sstable_data_integrity_check, bool, false, Used, "Enable interposer which checks for integrity of every sstable write." \
+        " Performance is affected to some extent as a result. Useful to help debugging problems that may arise at another layers.") \
     /* done! */
 
 #define _make_value_member(name, type, deflt, status, desc, ...)    \
-    value<type, value_status::status> name;
+    named_value<type, value_status::status> name;
 
     _make_config_values(_make_value_member)
 
+    seastar::logging_settings logging_settings(const boost::program_options::variables_map&) const;
+
+    boost::program_options::options_description_easy_init&
+    add_options(boost::program_options::options_description_easy_init&);
+
 private:
-    struct bound_value;
-    struct bound_values;
-    struct cmdline_args;
-    struct yaml_config;
+    template<typename T>
+    struct log_legacy_value : public named_value<T, value_status::Used> {
+        using MyBase = named_value<T, value_status::Used>;
 
-    int _dummy;
+        using MyBase::MyBase;
+
+        T value_or(T&& t) const {
+            return this->is_set() ? (*this)() : t;
+        }
+        // do not add to boost::options. We only care about yaml config
+        void add_command_line_option(boost::program_options::options_description_easy_init&,
+                        const stdx::string_view&, const stdx::string_view&) override {}
+    };
+
+    log_legacy_value<seastar::log_level> default_log_level;
+    log_legacy_value<std::unordered_map<sstring, seastar::log_level>> logger_log_level;
+    log_legacy_value<bool> log_to_stdout, log_to_syslog;
 };
-
 
 }

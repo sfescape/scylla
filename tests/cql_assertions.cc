@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -21,6 +21,7 @@
  */
 
 #include <boost/test/unit_test.hpp>
+#include <boost/range/adaptor/transformed.hpp>
 #include "cql_assertions.hh"
 #include "transport/messages/result_message.hh"
 #include "to_string.hh"
@@ -30,7 +31,7 @@ static inline void fail(sstring msg) {
     throw std::runtime_error(msg);
 }
 
-rows_assertions::rows_assertions(shared_ptr<transport::messages::result_message::rows> rows)
+rows_assertions::rows_assertions(shared_ptr<cql_transport::messages::result_message::rows> rows)
     : _rows(rows)
 { }
 
@@ -91,16 +92,37 @@ rows_assertions::with_rows(std::initializer_list<std::initializer_list<bytes_opt
     return {*this};
 }
 
-result_msg_assertions::result_msg_assertions(shared_ptr<transport::messages::result_message> msg)
+// Verifies that the result has the following rows and only those rows.
+rows_assertions
+rows_assertions::with_rows_ignore_order(std::initializer_list<std::initializer_list<bytes_opt>> rows) {
+    auto& actual = _rows->rs().rows();
+    for (auto&& expected : rows) {
+        auto found = std::find_if(std::begin(actual), std::end(actual), [&] (auto&& row) {
+            return std::equal(
+                    std::begin(row), std::end(row),
+                    std::begin(expected), std::end(expected));
+        });
+        if (found == std::end(actual)) {
+            fail(sprint("row %s not found in result set (%s)", to_string(expected),
+               ::join(", ", actual | boost::adaptors::transformed([] (auto& r) { return to_string(r); }))));
+        }
+    }
+    if (_rows->rs().size() != rows.size()) {
+        fail(sprint("Expected more rows (%d), got %d", _rows->rs().size(), rows.size()));
+    }
+    return {*this};
+}
+
+result_msg_assertions::result_msg_assertions(shared_ptr<cql_transport::messages::result_message> msg)
     : _msg(msg)
 { }
 
 rows_assertions result_msg_assertions::is_rows() {
-    auto rows = dynamic_pointer_cast<transport::messages::result_message::rows>(_msg);
+    auto rows = dynamic_pointer_cast<cql_transport::messages::result_message::rows>(_msg);
     BOOST_REQUIRE(rows);
     return rows_assertions(rows);
 }
 
-result_msg_assertions assert_that(shared_ptr<transport::messages::result_message> msg) {
+result_msg_assertions assert_that(shared_ptr<cql_transport::messages::result_message> msg) {
     return result_msg_assertions(msg);
 }

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -47,7 +47,7 @@
 
 #include <algorithm>
 #include <functional>
-#include <iostream>
+#include <iosfwd>
 
 namespace cql3 {
 
@@ -55,15 +55,17 @@ namespace cql3 {
  * Represents an identifer for a CQL column definition.
  * TODO : should support light-weight mode without text representation for when not interned
  */
-class column_identifier final : public selection::selectable /* implements IMeasurableMemory*/ {
+class column_identifier final : public selection::selectable {
 public:
     bytes bytes_;
 private:
     sstring _text;
-#if 0
-    private static final long EMPTY_SIZE = ObjectSizes.measure(new ColumnIdentifier("", true));
-#endif
 public:
+    // less comparator sorting by text
+    struct text_comparator {
+        bool operator()(const column_identifier& c1, const column_identifier& c2) const;
+    };
+
     column_identifier(sstring raw_text, bool keep_case);
 
     column_identifier(bytes bytes_, data_type type);
@@ -78,25 +80,13 @@ public:
 
     sstring to_string() const;
 
+    sstring to_cql_string() const;
+
     friend std::ostream& operator<<(std::ostream& out, const column_identifier& i) {
         return out << i._text;
     }
 
 #if 0
-    public long unsharedHeapSize()
-    {
-        return EMPTY_SIZE
-             + ObjectSizes.sizeOnHeapOf(bytes)
-             + ObjectSizes.sizeOf(text);
-    }
-
-    public long unsharedHeapSizeExcludingData()
-    {
-        return EMPTY_SIZE
-             + ObjectSizes.sizeOnHeapExcludingData(bytes)
-             + ObjectSizes.sizeOf(text);
-    }
-
     public ColumnIdentifier clone(AbstractAllocator allocator)
     {
         return new ColumnIdentifier(allocator.clone(bytes), text);

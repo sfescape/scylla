@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -21,7 +21,7 @@
 
 #pragma once
 
-#include <iostream>
+#include <iosfwd>
 #include "core/print.hh"
 #include "core/sstring.hh"
 #include "core/enum.hh"
@@ -29,6 +29,7 @@
 namespace unimplemented {
 
 enum class cause {
+    API,
     INDEXES,
     LWT,
     PAGING,
@@ -42,7 +43,6 @@ enum class cause {
     TOKEN_RESTRICTION,
     LEGACY_COMPOSITE_KEYS,
     COLLECTION_RANGE_TOMBSTONES,
-    RANGE_QUERIES,
     RANGE_DELETES,
     THRIFT,
     VALIDATION,
@@ -54,9 +54,13 @@ enum class cause {
     SUPER,
     WRAP_AROUND, // Support for handling wrap around ranges in queries on database level and below
     STORAGE_SERVICE,
+    SCHEMA_CHANGE,
+    MIXED_CF,
+    VIEWS,
+    ROLES,
 };
 
-void fail(cause what) __attribute__((noreturn));
+[[noreturn]] void fail(cause what);
 void warn(cause what);
 
 }
@@ -64,6 +68,6 @@ void warn(cause what);
 namespace std {
 
 template <>
-struct hash<unimplemented::cause> : enum_hash<unimplemented::cause> {};
+struct hash<unimplemented::cause> : seastar::enum_hash<unimplemented::cause> {};
 
 }

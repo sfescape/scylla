@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -58,7 +58,7 @@ public:
 
     void set_keyspace(sstring keyspace);
 
-    sstring get_keyspace() const;
+    const sstring& get_keyspace() const;
 
     bytes get_user_type_name() const;
 

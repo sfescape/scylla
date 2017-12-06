@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Cloudius Systems
+ * Copyright (C) 2014 ScyllaDB
  */
 
 /*
@@ -72,6 +72,7 @@ public:
     template<typename T> T read();
 
     bytes_view read_view(size_t len) {
+        ensure(len);
         bytes_view v(_view.begin(), len);
         _view.remove_prefix(len);
         return v;

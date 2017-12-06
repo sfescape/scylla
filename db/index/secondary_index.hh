@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -42,6 +42,7 @@
 #pragma once
 
 #include "core/sstring.hh"
+#include "seastarx.hh"
 
 namespace db {
 namespace index {

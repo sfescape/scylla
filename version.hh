@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -26,6 +26,8 @@
 #include "core/print.hh"
 #include <tuple>
 
+#include "seastarx.hh"
+
 namespace version {
 class version {
     std::tuple<uint16_t, uint16_t, uint16_t> _version;
@@ -37,7 +39,7 @@ public:
     }
 
     static version current() {
-        static version v(2, 1, 8);
+        static version v(3, 0, 8);
         return v;
     }
 
@@ -62,10 +64,6 @@ public:
         return _version >= v._version;
     }
 };
-
-inline const int native_protocol() {
-    return 3;
-}
 
 inline const sstring& release() {
     static thread_local auto str_ver = version::current().to_sstring();

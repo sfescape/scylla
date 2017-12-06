@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -21,13 +21,17 @@
 
 #pragma once
 
+#include "seastarx.hh"
 #include "core/sstring.hh"
+#include "hashing.hh"
 #include <experimental/optional>
 #include <iosfwd>
 #include <functional>
+#include "utils/mutable_view.hh"
 
 using bytes = basic_sstring<int8_t, uint32_t, 31>;
 using bytes_view = std::experimental::basic_string_view<int8_t>;
+using bytes_mutable_view = basic_mutable_view<bytes_view::value_type>;
 using bytes_opt = std::experimental::optional<bytes>;
 using sstring_view = std::experimental::string_view;
 
@@ -57,3 +61,20 @@ std::ostream& operator<<(std::ostream& os, const bytes_view& b);
 
 }
 
+template<>
+struct appending_hash<bytes> {
+    template<typename Hasher>
+    void operator()(Hasher& h, const bytes& v) const {
+        feed_hash(h, v.size());
+        h.update(reinterpret_cast<const char*>(v.cbegin()), v.size() * sizeof(bytes::value_type));
+    }
+};
+
+template<>
+struct appending_hash<bytes_view> {
+    template<typename Hasher>
+    void operator()(Hasher& h, bytes_view v) const {
+        feed_hash(h, v.size());
+        h.update(reinterpret_cast<const char*>(v.begin()), v.size() * sizeof(bytes_view::value_type));
+    }
+};

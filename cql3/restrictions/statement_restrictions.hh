@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -49,6 +49,7 @@
 #include "cql3/restrictions/single_column_restrictions.hh"
 #include "cql3/relation.hh"
 #include "cql3/variable_specifications.hh"
+#include "cql3/statements/statement_type.hh"
 
 namespace cql3 {
 
@@ -83,6 +84,8 @@ private:
      */
     ::shared_ptr<single_column_restrictions> _nonprimary_key_restrictions;
 
+    std::unordered_set<const column_definition*> _not_null_columns;
+
     /**
      * The restrictions used to build the index expressions
      */
@@ -109,15 +112,19 @@ public:
 
     statement_restrictions(database& db,
         schema_ptr schema,
+        statements::statement_type type,
         const std::vector<::shared_ptr<relation>>& where_clause,
         ::shared_ptr<variable_specifications> bound_names,
         bool selects_only_static_columns,
-        bool select_a_collection);
+        bool select_a_collection,
+        bool for_view = false);
 private:
     void add_restriction(::shared_ptr<restriction> restriction);
     void add_single_column_restriction(::shared_ptr<single_column_restriction> restriction);
 public:
     bool uses_function(const sstring& ks_name, const sstring& function_name) const;
+
+    const std::vector<::shared_ptr<restrictions>>& index_restrictions() const;
 
     /**
      * Checks if the restrictions on the partition key is an IN restriction.
@@ -147,14 +154,27 @@ public:
         return _uses_secondary_indexing;
     }
 
-private:
-    void process_partition_key_restrictions(bool has_queriable_index);
+    ::shared_ptr<primary_key_restrictions<partition_key>> get_partition_key_restrictions() const {
+        return _partition_key_restrictions;
+    }
+
+    ::shared_ptr<primary_key_restrictions<clustering_key_prefix>> get_clustering_columns_restrictions() const {
+        return _clustering_columns_restrictions;
+    }
 
     /**
      * Checks if the partition key has some unrestricted components.
      * @return <code>true</code> if the partition key has some unrestricted components, <code>false</code> otherwise.
      */
     bool has_partition_key_unrestricted_components() const;
+
+    /**
+     * Checks if the clustering key has some unrestricted components.
+     * @return <code>true</code> if the clustering key has some unrestricted components, <code>false</code> otherwise.
+     */
+    bool has_unrestricted_clustering_columns() const;
+private:
+    void process_partition_key_restrictions(bool has_queriable_index, bool for_view);
 
     /**
      * Returns the partition key components that are not restricted.
@@ -169,7 +189,21 @@ private:
      * @param select_a_collection <code>true</code> if the query should return a collection column
      * @throws InvalidRequestException if the request is invalid
      */
-    void process_clustering_columns_restrictions(bool has_queriable_index, bool select_a_collection);
+    void process_clustering_columns_restrictions(bool has_queriable_index, bool select_a_collection, bool for_view);
+
+    /**
+     * Returns the <code>Restrictions</code> for the specified type of columns.
+     *
+     * @param kind the column type
+     * @return the <code>restrictions</code> for the specified type of columns
+     */
+    ::shared_ptr<restrictions> get_restrictions(column_kind kind) const {
+        switch (kind) {
+        case column_kind::partition_key: return _partition_key_restrictions;
+        case column_kind::clustering_key: return _clustering_columns_restrictions;
+        default: return _nonprimary_key_restrictions;
+        }
+    }
 
 #if 0
     std::vector<::shared_ptr<index_expression>> get_index_expressions(const query_options& options) {
@@ -208,7 +242,7 @@ public:
      * @return the specified bound of the partition key
      * @throws InvalidRequestException if the boundary cannot be retrieved
      */
-    std::vector<query::partition_range> get_partition_key_ranges(const query_options& options) const;
+    dht::partition_range_vector get_partition_key_ranges(const query_options& options) const;
 
 #if 0
     /**
@@ -293,20 +327,7 @@ private:
         checkNotNull(value, "Invalid null token value");
         return p.getTokenFactory().fromByteArray(value);
     }
-#endif
 
-public:
-    /**
-     * Checks if the query does not contains any restriction on the clustering columns.
-     *
-     * @return <code>true</code> if the query does not contains any restriction on the clustering columns,
-     * <code>false</code> otherwise.
-     */
-    bool has_no_clustering_columns_restriction() const {
-        return _clustering_columns_restrictions->empty();
-    }
-
-#if 0
     // For non-composite slices, we don't support internally the difference between exclusive and
     // inclusive bounds, so we deal with it manually.
     bool is_non_composite_slice_with_exclusive_bounds()
@@ -346,8 +367,36 @@ public:
      * @return <code>true</code> if the query has some restrictions on the clustering columns,
      * <code>false</code> otherwise.
      */
-    bool has_clustering_columns_restriction() {
+    bool has_clustering_columns_restriction() const {
         return !_clustering_columns_restrictions->empty();
+    }
+
+    /**
+     * Checks if the restrictions contain any non-primary key restrictions
+     *
+     * @return <code>true</code> if the restrictions contain any non-primary key restrictions, <code>false</code> otherwise.
+     */
+    bool has_non_primary_key_restriction() const {
+        return !_nonprimary_key_restrictions->empty();
+    }
+
+    /**
+     * @return true if column is restricted by some restriction, false otherwise
+     */
+    bool is_restricted(const column_definition* cdef) const {
+        if (_not_null_columns.find(cdef) != _not_null_columns.end()) {
+            return true;
+        }
+
+        auto&& restricted = get_restrictions(cdef->kind).get()->get_column_defs();
+        return std::find(restricted.begin(), restricted.end(), cdef) != restricted.end();
+    }
+
+     /**
+      * @return the non-primary key restrictions.
+      */
+    const single_column_restrictions::restrictions_map& get_non_pk_restriction() const {
+        return _nonprimary_key_restrictions->restrictions();
     }
 };
 

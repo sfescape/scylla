@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -36,6 +36,7 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "gms/versioned_value.hh"
+#include "message/messaging_service.hh"
 
 namespace gms {
 
@@ -49,6 +50,11 @@ constexpr const char* versioned_value::STATUS_MOVING;
 constexpr const char* versioned_value::REMOVING_TOKEN;
 constexpr const char* versioned_value::REMOVED_TOKEN;
 constexpr const char* versioned_value::HIBERNATE;
+constexpr const char* versioned_value::SHUTDOWN;
 constexpr const char* versioned_value::REMOVAL_COORDINATOR;
+
+versioned_value versioned_value::factory::network_version() {
+    return versioned_value(sprint("%s",netw::messaging_service::current_version));
+}
 
 }

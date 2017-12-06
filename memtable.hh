@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -28,32 +28,55 @@
 #include "schema.hh"
 #include "mutation_reader.hh"
 #include "db/commitlog/replay_position.hh"
+#include "db/commitlog/rp_set.hh"
 #include "utils/logalloc.hh"
-#include "sstables/sstables.hh"
+#include "partition_version.hh"
+#include "flat_mutation_reader.hh"
 
 class frozen_mutation;
 
 
 namespace bi = boost::intrusive;
 
-class partition_entry {
+class memtable_entry {
     bi::set_member_hook<> _link;
+    schema_ptr _schema;
     dht::decorated_key _key;
-    mutation_partition _p;
+    partition_entry _pe;
 public:
     friend class memtable;
 
-    partition_entry(dht::decorated_key key, mutation_partition p)
-        : _key(std::move(key))
-        , _p(std::move(p))
+    memtable_entry(schema_ptr s, dht::decorated_key key, mutation_partition p)
+        : _schema(std::move(s))
+        , _key(std::move(key))
+        , _pe(std::move(p))
     { }
 
-    partition_entry(partition_entry&& o) noexcept;
+    memtable_entry(memtable_entry&& o) noexcept;
 
     const dht::decorated_key& key() const { return _key; }
     dht::decorated_key& key() { return _key; }
-    const mutation_partition& partition() const { return _p; }
-    mutation_partition& partition() { return _p; }
+    const partition_entry& partition() const { return _pe; }
+    partition_entry& partition() { return _pe; }
+    const schema_ptr& schema() const { return _schema; }
+    schema_ptr& schema() { return _schema; }
+    flat_mutation_reader read(lw_shared_ptr<memtable> mtbl, const schema_ptr&, const query::partition_slice&, streamed_mutation::forwarding);
+
+    size_t external_memory_usage_without_rows() const {
+        return _key.key().external_memory_usage();
+    }
+
+    size_t size_in_allocator_without_rows(allocation_strategy& allocator) {
+        return allocator.object_memory_size_in_allocator(this) + external_memory_usage_without_rows();
+    }
+
+    size_t size_in_allocator(allocation_strategy& allocator) {
+        auto size = size_in_allocator_without_rows(allocator);
+        for (auto&& v : _pe.versions()) {
+            size += v.size_in_allocator(allocator);
+        }
+        return size;
+    }
 
     struct compare {
         dht::decorated_key::less_comparator _c;
@@ -62,56 +85,104 @@ public:
             : _c(std::move(s))
         {}
 
-        bool operator()(const dht::decorated_key& k1, const partition_entry& k2) const {
+        bool operator()(const dht::decorated_key& k1, const memtable_entry& k2) const {
             return _c(k1, k2._key);
         }
 
-        bool operator()(const partition_entry& k1, const partition_entry& k2) const {
+        bool operator()(const memtable_entry& k1, const memtable_entry& k2) const {
             return _c(k1._key, k2._key);
         }
 
-        bool operator()(const partition_entry& k1, const dht::decorated_key& k2) const {
+        bool operator()(const memtable_entry& k1, const dht::decorated_key& k2) const {
             return _c(k1._key, k2);
         }
 
-        bool operator()(const partition_entry& k1, const dht::ring_position& k2) const {
+        bool operator()(const memtable_entry& k1, const dht::ring_position& k2) const {
             return _c(k1._key, k2);
         }
 
-        bool operator()(const dht::ring_position& k1, const partition_entry& k2) const {
+        bool operator()(const dht::ring_position& k1, const memtable_entry& k2) const {
             return _c(k1, k2._key);
         }
     };
 };
 
+class dirty_memory_manager;
+
 // Managed by lw_shared_ptr<>.
-class memtable final : public enable_lw_shared_from_this<memtable> {
+class memtable final : public enable_lw_shared_from_this<memtable>, private logalloc::region {
 public:
-    using partitions_type = bi::set<partition_entry,
-        bi::member_hook<partition_entry, bi::set_member_hook<>, &partition_entry::_link>,
-        bi::compare<partition_entry::compare>>;
+    using partitions_type = bi::set<memtable_entry,
+        bi::member_hook<memtable_entry, bi::set_member_hook<>, &memtable_entry::_link>,
+        bi::compare<memtable_entry::compare>>;
 private:
+    dirty_memory_manager& _dirty_mgr;
+    memtable_list *_memtable_list;
     schema_ptr _schema;
-    mutable logalloc::region _region;
+    logalloc::allocating_section _read_section;
+    logalloc::allocating_section _allocating_section;
     partitions_type partitions;
     db::replay_position _replay_position;
-    lw_shared_ptr<sstables::sstable> _sstable;
-    void update(const db::replay_position&);
+    db::rp_set _rp_set;
+    // mutation source to which reads fall-back after mark_flushed()
+    // so that memtable contents can be moved away while there are
+    // still active readers. This is needed for this mutation_source
+    // to be monotonic (not loose writes). Monotonicity of each
+    // mutation_source is necessary for the combined mutation source to be
+    // monotonic. That combined source in this case is cache + memtable.
+    mutation_source_opt _underlying;
+    uint64_t _flushed_memory = 0;
+    void update(db::rp_handle&&);
     friend class row_cache;
+    friend class memtable_entry;
+    friend class flush_reader;
+    friend class flush_memory_accounter;
 private:
-    boost::iterator_range<partitions_type::const_iterator> slice(const query::partition_range& r) const;
-    mutation_partition& find_or_create_partition(const dht::decorated_key& key);
-    mutation_partition& find_or_create_partition_slow(partition_key_view key);
+    boost::iterator_range<partitions_type::const_iterator> slice(const dht::partition_range& r) const;
+    partition_entry& find_or_create_partition(const dht::decorated_key& key);
+    partition_entry& find_or_create_partition_slow(partition_key_view key);
+    void upgrade_entry(memtable_entry&);
+    void add_flushed_memory(uint64_t);
+    void remove_flushed_memory(uint64_t);
+    void clear() noexcept;
+    uint64_t dirty_size() const;
 public:
-    explicit memtable(schema_ptr schema, logalloc::region_group* dirty_memory_region_group = nullptr);
+    explicit memtable(schema_ptr schema, dirty_memory_manager&, memtable_list *memtable_list = nullptr);
+    // Used for testing that want to control the flush process.
+    explicit memtable(schema_ptr schema);
     ~memtable();
+    // Clears this memtable gradually without consuming the whole CPU.
+    // Never resolves with a failed future.
+    future<> clear_gently() noexcept;
     schema_ptr schema() const { return _schema; }
-    void apply(const mutation& m, const db::replay_position& = db::replay_position());
-    void apply(const frozen_mutation& m, const db::replay_position& = db::replay_position());
+    void set_schema(schema_ptr) noexcept;
+    future<> apply(memtable&);
+    // Applies mutation to this memtable.
+    // The mutation is upgraded to current schema.
+    void apply(const mutation& m, db::rp_handle&& = {});
+    // The mutation is upgraded to current schema.
+    void apply(const frozen_mutation& m, const schema_ptr& m_schema, db::rp_handle&& = {});
+
+    static memtable& from_region(logalloc::region& r) {
+        return static_cast<memtable&>(r);
+    }
+
     const logalloc::region& region() const {
-        return _region;
+        return *this;
+    }
+
+    logalloc::region& region() {
+        return *this;
+    }
+
+    logalloc::region_group* region_group() {
+        return group();
     }
 public:
+    memtable_list* get_memtable_list() {
+        return _memtable_list;
+    }
+
     size_t partition_count() const;
     logalloc::occupancy_stats occupancy() const;
 
@@ -121,17 +192,54 @@ public:
     // doesn't need to ensure that memtable remains live.
     //
     // The 'range' parameter must be live as long as the reader is being used
-    mutation_reader make_reader(const query::partition_range& range = query::full_partition_range) const;
+    //
+    // Mutations returned by the reader will all have given schema.
+    mutation_reader make_reader(schema_ptr,
+                                const dht::partition_range& range,
+                                const query::partition_slice& slice,
+                                const io_priority_class& pc = default_priority_class(),
+                                tracing::trace_state_ptr trace_state_ptr = nullptr,
+                                streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
+                                mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes);
+
+    mutation_reader make_reader(schema_ptr s, const dht::partition_range& range = query::full_partition_range) {
+        auto& full_slice = s->full_slice();
+        return make_reader(s, range, full_slice);
+    }
+
+    flat_mutation_reader make_flat_reader(schema_ptr,
+                                          const dht::partition_range& range,
+                                          const query::partition_slice& slice,
+                                          const io_priority_class& pc = default_priority_class(),
+                                          tracing::trace_state_ptr trace_state_ptr = nullptr,
+                                          streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
+                                          mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes);
+
+    flat_mutation_reader make_flat_reader(schema_ptr s,
+                                          const dht::partition_range& range = query::full_partition_range) {
+        auto& full_slice = s->full_slice();
+        return make_flat_reader(s, range, full_slice);
+    }
+
+    flat_mutation_reader make_flush_reader(schema_ptr, const io_priority_class& pc);
 
     mutation_source as_data_source();
 
     bool empty() const { return partitions.empty(); }
-    void mark_flushed(lw_shared_ptr<sstables::sstable> sst);
+    void mark_flushed(mutation_source) noexcept;
     bool is_flushed() const;
+    void on_detach_from_region_group() noexcept;
+    void revert_flushed_memory() noexcept;
 
     const db::replay_position& replay_position() const {
         return _replay_position;
     }
+    const db::rp_set& rp_set() const {
+        return _rp_set;
+    }
+    friend class iterator_reader;
 
-    friend class scanning_reader;
+    dirty_memory_manager& get_dirty_memory_manager() {
+        return _dirty_mgr;
+    }
 };

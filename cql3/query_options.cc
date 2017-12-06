@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -47,85 +47,92 @@ namespace cql3 {
 thread_local const query_options::specific_options query_options::specific_options::DEFAULT{-1, {}, {}, api::missing_timestamp};
 
 thread_local query_options query_options::DEFAULT{db::consistency_level::ONE, std::experimental::nullopt,
-    {}, false, query_options::specific_options::DEFAULT, version::native_protocol(), serialization_format::use_32_bit()};
+    std::vector<cql3::raw_value_view>(), false, query_options::specific_options::DEFAULT, cql_serialization_format::latest()};
+
+query_options::query_options(db::consistency_level consistency,
+                           std::experimental::optional<std::vector<sstring_view>> names,
+                           std::vector<cql3::raw_value> values,
+                           std::vector<cql3::raw_value_view> value_views,
+                           bool skip_metadata,
+                           specific_options options,
+                           cql_serialization_format sf)
+   : _consistency(consistency)
+   , _names(std::move(names))
+   , _values(std::move(values))
+   , _value_views(value_views)
+   , _skip_metadata(skip_metadata)
+   , _options(std::move(options))
+   , _cql_serialization_format(sf)
+{
+}
 
 query_options::query_options(db::consistency_level consistency,
                              std::experimental::optional<std::vector<sstring_view>> names,
-                             std::vector<bytes_opt> values,
-                             std::vector<bytes_view_opt> value_views,
+                             std::vector<cql3::raw_value> values,
                              bool skip_metadata,
                              specific_options options,
-                             int32_t protocol_version,
-                             serialization_format sf)
+                             cql_serialization_format sf)
     : _consistency(consistency)
     , _names(std::move(names))
     , _values(std::move(values))
-    , _value_views(std::move(value_views))
+    , _value_views()
     , _skip_metadata(skip_metadata)
     , _options(std::move(options))
-    , _protocol_version(protocol_version)
-    , _serialization_format(sf)
+    , _cql_serialization_format(sf)
 {
+    fill_value_views();
 }
 
 query_options::query_options(db::consistency_level consistency,
                              std::experimental::optional<std::vector<sstring_view>> names,
-                             std::vector<bytes_view_opt> value_views,
+                             std::vector<cql3::raw_value_view> value_views,
                              bool skip_metadata,
                              specific_options options,
-                             int32_t protocol_version,
-                             serialization_format sf)
-    : query_options(
-          consistency,
-          std::move(names),
-          {},
-          std::move(value_views),
-          skip_metadata,
-          std::move(options),
-          protocol_version,
-          sf
-      )
+                             cql_serialization_format sf)
+    : _consistency(consistency)
+    , _names(std::move(names))
+    , _values()
+    , _value_views(std::move(value_views))
+    , _skip_metadata(skip_metadata)
+    , _options(std::move(options))
+    , _cql_serialization_format(sf)
 {
 }
 
-query_options::query_options(query_options&& o, std::vector<std::vector<bytes_view_opt>> value_views)
-    : query_options(std::move(o))
-{
-    std::vector<query_options> tmp;
-    tmp.reserve(value_views.size());
-    std::transform(value_views.begin(), value_views.end(), std::back_inserter(tmp), [this](auto& vals) {
-        return query_options(_consistency, {}, vals, _skip_metadata, _options, _protocol_version, _serialization_format);
-    });
-    _batch_options = std::move(tmp);
-}
-
-query_options::query_options(std::vector<bytes_opt> values)
+query_options::query_options(db::consistency_level cl, std::vector<cql3::raw_value> values, specific_options options)
     : query_options(
-          db::consistency_level::ONE,
+          cl,
           {},
           std::move(values),
-          {},
           false,
-          query_options::specific_options::DEFAULT,
-          version::native_protocol(),
-          serialization_format::use_32_bit()
+          std::move(options),
+          cql_serialization_format::latest()
       )
 {
-    for (auto&& value : _values) {
-        if (value) {
-            _value_views.emplace_back(bytes_view{*value});
-        } else {
-            _value_views.emplace_back(std::experimental::nullopt);
-        }
-    }
 }
+
+query_options::query_options(std::unique_ptr<query_options> qo, ::shared_ptr<service::pager::paging_state> paging_state)
+        : query_options(qo->_consistency,
+        std::move(qo->_names),
+        std::move(qo->_values),
+        std::move(qo->_value_views),
+        qo->_skip_metadata,
+        std::move(query_options::specific_options{qo->_options.page_size, paging_state, qo->_options.serial_consistency, qo->_options.timestamp}),
+        qo->_cql_serialization_format) {
+
+}
+
+query_options::query_options(std::vector<cql3::raw_value> values)
+    : query_options(
+          db::consistency_level::ONE, std::move(values))
+{}
 
 db::consistency_level query_options::get_consistency() const
 {
     return _consistency;
 }
 
-bytes_view_opt query_options::get_value_at(size_t idx) const
+cql3::raw_value_view query_options::get_value_at(size_t idx) const
 {
     return _value_views.at(idx);
 }
@@ -135,14 +142,14 @@ size_t query_options::get_values_count() const
     return _value_views.size();
 }
 
-bytes_view_opt query_options::make_temporary(bytes_opt value) const
+cql3::raw_value_view query_options::make_temporary(cql3::raw_value value) const
 {
     if (value) {
         _temporaries.emplace_back(value->begin(), value->end());
         auto& temporary = _temporaries.back();
-        return bytes_view{temporary.data(), temporary.size()};
+        return cql3::raw_value_view::make_value(bytes_view{temporary.data(), temporary.size()});
     }
-    return std::experimental::nullopt;
+    return cql3::raw_value_view::make_null();
 }
 
 bool query_options::skip_metadata() const
@@ -173,12 +180,12 @@ api::timestamp_type query_options::get_timestamp(service::query_state& state) co
 
 int query_options::get_protocol_version() const
 {
-    return _protocol_version;
+    return _cql_serialization_format.protocol_version();
 }
 
-serialization_format query_options::get_serialization_format() const
+cql_serialization_format query_options::get_cql_serialization_format() const
 {
-    return _serialization_format;
+    return _cql_serialization_format;
 }
 
 const query_options::specific_options& query_options::get_specific_options() const
@@ -202,7 +209,7 @@ void query_options::prepare(const std::vector<::shared_ptr<column_specification>
     }
 
     auto& names = *_names;
-    std::vector<bytes_opt> ordered_values;
+    std::vector<cql3::raw_value> ordered_values;
     ordered_values.reserve(specs.size());
     for (auto&& spec : specs) {
         auto& spec_name = spec->name->text();
@@ -214,6 +221,18 @@ void query_options::prepare(const std::vector<::shared_ptr<column_specification>
         }
     }
     _values = std::move(ordered_values);
+    fill_value_views();
+}
+
+void query_options::fill_value_views()
+{
+    for (auto&& value : _values) {
+        if (value) {
+            _value_views.emplace_back(cql3::raw_value_view::make_value(bytes_view{*value}));
+        } else {
+            _value_views.emplace_back(cql3::raw_value_view::make_null());
+        }
+    }
 }
 
 }

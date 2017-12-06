@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -41,6 +41,8 @@
 
 #include "cql3/statements/cf_prop_defs.hh"
 
+#include <boost/algorithm/string/predicate.hpp>
+
 namespace cql3 {
 
 namespace statements {
@@ -61,8 +63,13 @@ const sstring cf_prop_defs::KW_MEMTABLE_FLUSH_PERIOD = "memtable_flush_period_in
 
 const sstring cf_prop_defs::KW_COMPACTION = "compaction";
 const sstring cf_prop_defs::KW_COMPRESSION = "compression";
+const sstring cf_prop_defs::KW_CRC_CHECK_CHANCE = "crc_check_chance";
+
+const sstring cf_prop_defs::KW_ID = "id";
 
 const sstring cf_prop_defs::COMPACTION_STRATEGY_CLASS_KEY = "class";
+
+const sstring cf_prop_defs::COMPACTION_ENABLED_KEY = "enabled";
 
 void cf_prop_defs::validate() {
     // Skip validation if the comapction strategy class is already set as it means we've alreayd
@@ -76,7 +83,7 @@ void cf_prop_defs::validate() {
         KW_GCGRACESECONDS, KW_CACHING, KW_DEFAULT_TIME_TO_LIVE,
         KW_MIN_INDEX_INTERVAL, KW_MAX_INDEX_INTERVAL, KW_SPECULATIVE_RETRY,
         KW_BF_FP_CHANCE, KW_MEMTABLE_FLUSH_PERIOD, KW_COMPACTION,
-        KW_COMPRESSION,
+        KW_COMPRESSION, KW_CRC_CHECK_CHANCE, KW_ID
     });
     static std::set<sstring> obsolete_keywords({
         sstring("index_interval"),
@@ -85,6 +92,12 @@ void cf_prop_defs::validate() {
     });
     property_definitions::validate(keywords, obsolete_keywords);
 
+    try {
+        get_id();
+    } catch(...) {
+        std::throw_with_nested(exceptions::configuration_exception("Invalid table id"));
+    }
+
     auto compaction_options = get_compaction_options();
     if (!compaction_options.empty()) {
         auto strategy = compaction_options.find(COMPACTION_STRATEGY_CLASS_KEY);
@@ -92,20 +105,20 @@ void cf_prop_defs::validate() {
             throw exceptions::configuration_exception(sstring("Missing sub-option '") + COMPACTION_STRATEGY_CLASS_KEY + "' for the '" + KW_COMPACTION + "' option.");
         }
         _compaction_strategy_class = sstables::compaction_strategy::type(strategy->second);
-#if 0
-       compactionOptions.remove(COMPACTION_STRATEGY_CLASS_KEY);
+        remove_from_map_if_exists(KW_COMPACTION, COMPACTION_STRATEGY_CLASS_KEY);
 
+#if 0
        CFMetaData.validateCompactionOptions(compactionStrategyClass, compactionOptions);
 #endif
     }
 
     auto compression_options = get_compression_options();
-    if (!compression_options.empty()) {
-        auto sstable_compression_class = compression_options.find(sstring(compression_parameters::SSTABLE_COMPRESSION));
-        if (sstable_compression_class == compression_options.end()) {
+    if (compression_options && !compression_options->empty()) {
+        auto sstable_compression_class = compression_options->find(sstring(compression_parameters::SSTABLE_COMPRESSION));
+        if (sstable_compression_class == compression_options->end()) {
             throw exceptions::configuration_exception(sstring("Missing sub-option '") + compression_parameters::SSTABLE_COMPRESSION + "' for the '" + KW_COMPRESSION + "' option.");
         }
-        compression_parameters cp(compression_options);
+        compression_parameters cp(*compression_options);
         cp.validate();
     }
 
@@ -131,12 +144,31 @@ std::map<sstring, sstring> cf_prop_defs::get_compaction_options() const {
     return std::map<sstring, sstring>{};
 }
 
-std::map<sstring, sstring> cf_prop_defs::get_compression_options() const {
+stdx::optional<std::map<sstring, sstring>> cf_prop_defs::get_compression_options() const {
     auto compression_options = get_map(KW_COMPRESSION);
     if (compression_options) {
-        return compression_options.value();
+        return { compression_options.value() };
     }
-    return std::map<sstring, sstring>{};
+    return { };
+}
+
+int32_t cf_prop_defs::get_default_time_to_live() const
+{
+    return get_int(KW_DEFAULT_TIME_TO_LIVE, 0);
+}
+
+int32_t cf_prop_defs::get_gc_grace_seconds() const
+{
+    return get_int(KW_GCGRACESECONDS, DEFAULT_GC_GRACE_SECONDS);
+}
+
+stdx::optional<utils::UUID> cf_prop_defs::get_id() const {
+    auto id = get_simple(KW_ID);
+    if (id) {
+        return utils::UUID(*id);
+    }
+
+    return stdx::nullopt;
 }
 
 void cf_prop_defs::apply_to_builder(schema_builder& builder) {
@@ -157,7 +189,7 @@ void cf_prop_defs::apply_to_builder(schema_builder& builder) {
     }
 
     std::experimental::optional<sstring> tmp_value = {};
-    if (has_property(KW_MINCOMPACTIONTHRESHOLD)) {
+    if (has_property(KW_COMPACTION)) {
         if (get_compaction_options().count(KW_MINCOMPACTIONTHRESHOLD)) {
             tmp_value = get_compaction_options().at(KW_MINCOMPACTIONTHRESHOLD);
         }
@@ -165,7 +197,7 @@ void cf_prop_defs::apply_to_builder(schema_builder& builder) {
     int min_compaction_threshold = to_int(KW_MINCOMPACTIONTHRESHOLD, tmp_value, builder.get_min_compaction_threshold());
 
     tmp_value = {};
-    if (has_property(KW_MAXCOMPACTIONTHRESHOLD)) {
+    if (has_property(KW_COMPACTION)) {
         if (get_compaction_options().count(KW_MAXCOMPACTIONTHRESHOLD)) {
             tmp_value = get_compaction_options().at(KW_MAXCOMPACTIONTHRESHOLD);
         }
@@ -176,6 +208,13 @@ void cf_prop_defs::apply_to_builder(schema_builder& builder) {
         throw exceptions::configuration_exception("Disabling compaction by setting compaction thresholds to 0 has been deprecated, set the compaction option 'enabled' to false instead.");
     builder.set_min_compaction_threshold(min_compaction_threshold);
     builder.set_max_compaction_threshold(max_compaction_threshold);
+
+    if (has_property(KW_COMPACTION)) {
+        if (get_compaction_options().count(COMPACTION_ENABLED_KEY)) {
+            auto enabled = boost::algorithm::iequals(get_compaction_options().at(COMPACTION_ENABLED_KEY), "true");
+            builder.set_compaction_enabled(enabled);
+        }
+    }
 
     builder.set_default_time_to_live(gc_clock::duration(get_int(KW_DEFAULT_TIME_TO_LIVE, DEFAULT_DEFAULT_TIME_TO_LIVE)));
 
@@ -201,8 +240,9 @@ void cf_prop_defs::apply_to_builder(schema_builder& builder) {
     }
 
     builder.set_bloom_filter_fp_chance(get_double(KW_BF_FP_CHANCE, builder.get_bloom_filter_fp_chance()));
-    if (!get_compression_options().empty()) {
-        builder.set_compressor_params(compression_parameters(get_compression_options()));
+    auto compression_options = get_compression_options();
+    if (compression_options) {
+        builder.set_compressor_params(compression_parameters(*compression_options));
     }
 #if 0
     CachingOptions cachingOptions = getCachingOptions();

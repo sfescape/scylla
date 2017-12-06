@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -55,21 +55,18 @@ public:
     enum class direction { OUT, IN };
 
     inet_address peer;
-    int session_index;
     sstring file_name;
     direction dir;
     long current_bytes;
     long total_bytes;
 
     progress_info() = default;
-    progress_info(inet_address _peer, int _session_index, sstring _file_name, direction _dir, long _current_bytes, long _total_bytes)
+    progress_info(inet_address _peer, sstring _file_name, direction _dir, long _current_bytes, long _total_bytes)
         : peer(_peer)
-        , session_index(_session_index)
         , file_name(_file_name)
         , dir(_dir)
         , current_bytes(_current_bytes)
         , total_bytes(_total_bytes) {
-        assert(_total_bytes > 0);
     }
 
     /**
@@ -79,32 +76,6 @@ public:
         return current_bytes >= total_bytes;
     }
 
-#if 0
-    /**
-     * ProgressInfo is considered to be equal only when all attributes except currentBytes are equal.
-     */
-    @Override
-    public boolean equals(Object o)
-    {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-
-        ProgressInfo that = (ProgressInfo) o;
-
-        if (totalBytes != that.totalBytes) return false;
-        if (direction != that.direction) return false;
-        if (!fileName.equals(that.fileName)) return false;
-        if (sessionIndex != that.sessionIndex) return false;
-        return peer.equals(that.peer);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hashCode(peer, sessionIndex, fileName, direction, totalBytes);
-    }
-
-#endif
     friend std::ostream& operator<<(std::ostream& os, const progress_info& x);
 };
 

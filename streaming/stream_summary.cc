@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -41,23 +41,6 @@
 #include "utils/serialization.hh"
 
 namespace streaming {
-
-void stream_summary::serialize(bytes::iterator& out) const {
-    cf_id.serialize(out);
-    serialize_int32(out, files);
-    serialize_int64(out, total_size);
-}
-
-stream_summary stream_summary::deserialize(bytes_view& v) {
-    auto cf_id_ = UUID::deserialize(v);
-    auto files_ = read_simple<int32_t>(v);
-    auto total_size_ = read_simple<int64_t>(v);
-    return stream_summary(std::move(cf_id_), files_, total_size_);
-}
-
-size_t stream_summary::serialized_size() const {
-    return cf_id.serialized_size() + serialize_int32_size + serialize_int64_size;
-}
 
 std::ostream& operator<<(std::ostream& os, const stream_summary& x) {
     os << "[ cf_id=" << x.cf_id << " ]";

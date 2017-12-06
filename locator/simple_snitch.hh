@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -86,12 +86,6 @@ struct simple_snitch : public snitch_base {
         // implementation and some installations may depend on it.
         //
         return 0;
-    }
-
-    // noop
-    virtual future<> stop() override {
-        _state = snitch_state::stopped;
-        return make_ready_future<>();
     }
 
     virtual sstring get_name() const override {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright 2015 ScyllaDB
  */
 
 /*
@@ -21,30 +21,17 @@
 
 #pragma once
 
-#include "http/httpd.hh"
 #include "json/json_elements.hh"
-#include "database.hh"
-#include "service/storage_proxy.hh"
 #include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
 #include "api/api-doc/utils.json.hh"
 #include "utils/histogram.hh"
 #include "http/exception.hh"
+#include "api_init.hh"
+#include "seastarx.hh"
 
 namespace api {
-
-struct http_context {
-    sstring api_dir;
-    sstring api_doc;
-    httpd::http_server_control http_server;
-    distributed<database>& db;
-    distributed<service::storage_proxy>& sp;
-    http_context(distributed<database>& _db, distributed<service::storage_proxy>&
-            _sp) : db(_db), sp(_sp) {}
-};
-
-future<> set_server(http_context& ctx);
 
 template<class T>
 std::vector<sstring> container_to_vec(const T& container) {
@@ -124,49 +111,46 @@ future<json::json_return_type>  sum_stats(distributed<T>& d, V F::*f) {
     });
 }
 
-inline double pow2(double a) {
-    return a * a;
+
+
+inline
+httpd::utils_json::histogram to_json(const utils::ihistogram& val) {
+    httpd::utils_json::histogram h;
+    h = val;
+    h.sum = val.estimated_sum();
+    return h;
 }
 
-inline httpd::utils_json::histogram add_histogram(httpd::utils_json::histogram res,
-        const utils::ihistogram& val) {
-    if (!res.count._set) {
-        res = val;
-        return res;
-    }
-    if (val.count == 0) {
-        return res;
-    }
-    if (res.min() > val.min) {
-        res.min = val.min;
-    }
-    if (res.max() < val.max) {
-        res.max = val.max;
-    }
-    double ncount = res.count() + val.count;
-    res.sum = res.sum() + val.sum;
-    double a = res.count()/ncount;
-    double b = val.count/ncount;
+inline
+httpd::utils_json::rate_moving_average meter_to_json(const utils::rate_moving_average& val) {
+    httpd::utils_json::rate_moving_average m;
+    m = val;
+    return m;
+}
 
-    double mean =  a * res.mean() + b * val.mean;
-
-    res.variance = (res.variance() + pow2(res.mean() - mean) )* a +
-            (val.variance + pow2(val.mean -mean))* b;
-
-    res.mean = mean;
-    res.count = res.count() + val.count;
-    for (auto i : val.sample) {
-        res.sample.push(i);
-    }
-    return res;
+inline
+httpd::utils_json::rate_moving_average_and_histogram timer_to_json(const utils::rate_moving_average_and_histogram& val) {
+    httpd::utils_json::rate_moving_average_and_histogram h;
+    h.hist = to_json(val.hist);
+    h.meter = meter_to_json(val.rate);
+    return h;
 }
 
 template<class T, class F>
-future<json::json_return_type>  sum_histogram_stats(distributed<T>& d, utils::ihistogram F::*f) {
+future<json::json_return_type>  sum_histogram_stats(distributed<T>& d, utils::timed_rate_moving_average_and_histogram F::*f) {
 
-    return d.map_reduce0([f](const T& p) {return p.get_stats().*f;}, httpd::utils_json::histogram(),
-            add_histogram).then([](const httpd::utils_json::histogram& val) {
-        return make_ready_future<json::json_return_type>(val);
+    return d.map_reduce0([f](const T& p) {return (p.get_stats().*f).hist;}, utils::ihistogram(),
+            std::plus<utils::ihistogram>()).then([](const utils::ihistogram& val) {
+        return make_ready_future<json::json_return_type>(to_json(val));
+    });
+}
+
+template<class T, class F>
+future<json::json_return_type>  sum_timer_stats(distributed<T>& d, utils::timed_rate_moving_average_and_histogram F::*f) {
+
+    return d.map_reduce0([f](const T& p) {return (p.get_stats().*f).rate();}, utils::rate_moving_average_and_histogram(),
+            std::plus<utils::rate_moving_average_and_histogram>()).then([](const utils::rate_moving_average_and_histogram& val) {
+        return make_ready_future<json::json_return_type>(timer_to_json(val));
     });
 }
 
@@ -183,33 +167,36 @@ inline int64_t max_int64(int64_t a, int64_t b) {
  * It combine total and the sub set for the ratio and its
  * to_json method return the ration sub/total
  */
-struct ratio_holder : public json::jsonable {
-    double total = 0;
-    double sub = 0;
+template<typename T>
+struct basic_ratio_holder : public json::jsonable {
+    T total = 0;
+    T sub = 0;
     virtual std::string to_json() const {
         if (total == 0) {
             return "0";
         }
         return std::to_string(sub/total);
     }
-    ratio_holder() = default;
-    ratio_holder& add(double _total, double _sub) {
+    basic_ratio_holder() = default;
+    basic_ratio_holder& add(T _total, T _sub) {
         total += _total;
         sub += _sub;
         return *this;
     }
-    ratio_holder(double _total, double _sub) {
+    basic_ratio_holder(T _total, T _sub) {
         total = _total;
         sub = _sub;
     }
-    ratio_holder& operator+=(const ratio_holder& a) {
+    basic_ratio_holder<T>& operator+=(const basic_ratio_holder<T>& a) {
         return add(a.total, a.sub);
     }
-    friend ratio_holder operator+(ratio_holder a, const ratio_holder& b) {
+    friend basic_ratio_holder<T> operator+(basic_ratio_holder a, const basic_ratio_holder<T>& b) {
         return a += b;
     }
 };
 
+typedef basic_ratio_holder<double>  ratio_holder;
+typedef basic_ratio_holder<int64_t> integral_ratio_holder;
 
 class unimplemented_exception : public base_exception {
 public:

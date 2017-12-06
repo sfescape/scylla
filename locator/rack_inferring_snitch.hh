@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -66,12 +66,6 @@ struct rack_inferring_snitch : public snitch_base {
 
     virtual sstring get_datacenter(inet_address endpoint) override {
         return std::to_string((endpoint.raw_addr() >> 16) & 0xFF);
-    }
-
-    // noop
-    virtual future<> stop() override {
-        _state = snitch_state::stopped;
-        return make_ready_future<>();
     }
 
     virtual sstring get_name() const override {

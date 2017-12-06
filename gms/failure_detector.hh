@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -44,10 +44,12 @@
 #include "core/distributed.hh"
 #include "utils/bounded_stats_deque.hh"
 #include "gms/i_failure_detector.hh"
-#include <iostream>
+#include <iosfwd>
 #include <cmath>
 #include <list>
 #include <map>
+#include <experimental/optional>
+
 
 namespace gms {
 class inet_address;
@@ -56,7 +58,7 @@ class endpoint_state;
 
 class arrival_window {
 public:
-    using clk = std::chrono::steady_clock;
+    using clk = seastar::lowres_system_clock;
 private:
     clk::time_point _tlast{clk::time_point::min()};
     utils::bounded_stats_deque _arrival_intervals;
@@ -65,7 +67,7 @@ private:
     // because everyone seems pretty accustomed to the default of 8, and users who have
     // already tuned their phi_convict_threshold for their own environments won't need to
     // change.
-    static constexpr double PHI_FACTOR{1.0 / std::log(10.0)};
+    static constexpr double PHI_FACTOR{M_LOG10El};
 
 public:
     arrival_window(int size)
@@ -78,12 +80,14 @@ public:
     // this value defaults to the same initial value the FD is seeded with
     static clk::duration get_max_interval();
 
-    void add(clk::time_point value);
+    void add(clk::time_point value, const gms::inet_address& ep);
 
     double mean();
 
     // see CASSANDRA-2597 for an explanation of the math at work here.
     double phi(clk::time_point tnow);
+
+    size_t size() { return _arrival_intervals.size(); }
 
     friend std::ostream& operator<<(std::ostream& os, const arrival_window& w);
 
@@ -102,12 +106,35 @@ private:
     // because everyone seems pretty accustomed to the default of 8, and users who have
     // already tuned their phi_convict_threshold for their own environments won't need to
     // change.
-    static constexpr double PHI_FACTOR{1.0 / std::log(10.0)}; // 0.434...
+    static constexpr double PHI_FACTOR{M_LOG10El};
+
     std::map<inet_address, arrival_window> _arrival_samples;
     std::list<i_failure_detection_event_listener*> _fd_evnt_listeners;
+    double _phi = 8;
+
+    static constexpr std::chrono::milliseconds DEFAULT_MAX_PAUSE{5000};
+
+    std::chrono::milliseconds get_max_local_pause() {
+        // FIXME: cassandra.max_local_pause_in_ms
+#if 0
+        if (System.getProperty("cassandra.max_local_pause_in_ms") != null) {
+            long pause = Long.parseLong(System.getProperty("cassandra.max_local_pause_in_ms"));
+            logger.warn("Overriding max local pause time to {}ms", pause);
+            return pause * 1000000L;
+        } else {
+            return DEFAULT_MAX_PAUSE;
+        }
+#endif
+        return DEFAULT_MAX_PAUSE;
+    }
+
+    std::experimental::optional<arrival_window::clk::time_point> _last_interpret;
+    arrival_window::clk::time_point _last_paused;
 
 public:
-    failure_detector() {
+    failure_detector() = default;
+
+    failure_detector(double phi) : _phi(phi) {
     }
 
     future<> stop() {
@@ -124,8 +151,12 @@ public:
 
     sstring get_endpoint_state(sstring address);
 
+    std::map<inet_address, arrival_window> arrival_samples() const {
+        return _arrival_samples;
+    }
+
 private:
-    void append_endpoint_state(std::stringstream& ss, endpoint_state& state);
+    void append_endpoint_state(std::stringstream& ss, const endpoint_state& state);
 
 public:
     /**
@@ -188,7 +219,7 @@ inline future<> set_phi_convict_threshold(double phi) {
     });
 }
 
-inline  future<double> get_phi_convict_threshold() {
+inline future<double> get_phi_convict_threshold() {
     return smp::submit_to(0, [] {
         return get_local_failure_detector().get_phi_convict_threshold();
     });
@@ -222,6 +253,12 @@ inline future<int> get_down_endpoint_count() {
 inline future<int> get_up_endpoint_count() {
     return smp::submit_to(0, [] {
         return get_local_failure_detector().get_up_endpoint_count();
+    });
+}
+
+inline future<std::map<inet_address, arrival_window>> get_arrival_samples() {
+    return smp::submit_to(0, [] {
+        return get_local_failure_detector().arrival_samples();
     });
 }
 

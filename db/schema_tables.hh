@@ -17,8 +17,8 @@
  */
 
 /*
- * Modified by Cloudius Systems
- * Copyright 2015 Cloudius Systems
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -43,6 +43,8 @@
 #include "service/storage_proxy.hh"
 #include "mutation.hh"
 #include "schema.hh"
+#include "hashing.hh"
+#include "schema_mutations.hh"
 
 #include <vector>
 #include <map>
@@ -55,78 +57,137 @@ namespace db {
 namespace schema_tables {
 
 using schema_result = std::map<sstring, lw_shared_ptr<query::result_set>>;
+using schema_result_value_type = std::pair<sstring, lw_shared_ptr<query::result_set>>;
 
-static constexpr auto KEYSPACES = "schema_keyspaces";
-static constexpr auto COLUMNFAMILIES = "schema_columnfamilies";
-static constexpr auto COLUMNS = "schema_columns";
-static constexpr auto TRIGGERS = "schema_triggers";
-static constexpr auto USERTYPES = "schema_usertypes";
-static constexpr auto FUNCTIONS = "schema_functions";
-static constexpr auto AGGREGATES = "schema_aggregates";
+namespace v3 {
+
+static constexpr auto NAME = "system_schema";
+static constexpr auto KEYSPACES = "keyspaces";
+static constexpr auto TABLES = "tables";
+static constexpr auto SCYLLA_TABLES = "scylla_tables";
+static constexpr auto COLUMNS = "columns";
+static constexpr auto DROPPED_COLUMNS = "dropped_columns";
+static constexpr auto TRIGGERS = "triggers";
+static constexpr auto VIEWS = "views";
+static constexpr auto TYPES = "types";
+static constexpr auto FUNCTIONS = "functions";
+static constexpr auto AGGREGATES = "aggregates";
+static constexpr auto INDEXES = "indexes";
+
+schema_ptr columns();
+schema_ptr dropped_columns();
+schema_ptr indexes();
+schema_ptr tables();
+schema_ptr scylla_tables();
+schema_ptr views();
+
+}
+
+namespace legacy {
+
+class schema_mutations {
+    mutation _columnfamilies;
+    mutation _columns;
+public:
+    schema_mutations(mutation columnfamilies, mutation columns)
+        : _columnfamilies(std::move(columnfamilies))
+        , _columns(std::move(columns))
+    { }
+    table_schema_version digest() const;
+};
+
+future<schema_mutations> read_table_mutations(distributed<service::storage_proxy>& proxy,
+    sstring keyspace_name, sstring table_name, schema_ptr s);
+
+}
+
+using namespace v3;
+
+// Change on non-backwards compatible changes of schema mutations.
+// Replication of schema between nodes with different version is inhibited.
+extern const sstring version;
 
 extern std::vector<const char*> ALL;
 
 std::vector<schema_ptr> all_tables();
 
+// saves/creates "ks" + all tables etc, while first deleting all old schema entries (will be rewritten)
+future<> save_system_schema(const sstring & ks);
+
+// saves/creates "system_schema" keyspace
 future<> save_system_keyspace_schema();
 
 future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>& proxy);
 
 future<std::vector<frozen_mutation>> convert_schema_to_mutations(distributed<service::storage_proxy>& proxy);
 
-future<schema_result::value_type>
+future<schema_result_value_type>
 read_schema_partition_for_keyspace(distributed<service::storage_proxy>& proxy, const sstring& schema_table_name, const sstring& keyspace_name);
+future<mutation> read_keyspace_mutation(distributed<service::storage_proxy>&, const sstring& keyspace_name);
 
 future<> merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations);
 
 future<> merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush);
 
-future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush);
-
 future<std::set<sstring>> merge_keyspaces(distributed<service::storage_proxy>& proxy, schema_result&& before, schema_result&& after);
 
 std::vector<mutation> make_create_keyspace_mutations(lw_shared_ptr<keyspace_metadata> keyspace, api::timestamp_type timestamp, bool with_tables_and_types_and_functions = true);
 
-lw_shared_ptr<keyspace_metadata> create_keyspace_from_schema_partition(const schema_result::value_type& partition);
+std::vector<mutation> make_drop_keyspace_mutations(lw_shared_ptr<keyspace_metadata> keyspace, api::timestamp_type timestamp);
 
-future<> merge_tables(distributed<service::storage_proxy>& proxy, schema_result&& before, schema_result&& after);
+lw_shared_ptr<keyspace_metadata> create_keyspace_from_schema_partition(const schema_result_value_type& partition);
 
-lw_shared_ptr<keyspace_metadata> create_keyspace_from_schema_partition(const schema_result::value_type& partition);
+future<std::vector<mutation>> make_create_type_mutations(lw_shared_ptr<keyspace_metadata> keyspace, user_type type, api::timestamp_type timestamp);
 
-mutation make_create_keyspace_mutation(lw_shared_ptr<keyspace_metadata> keyspace, api::timestamp_type timestamp, bool with_tables_and_types_and_functions = true);
+std::vector<user_type> create_types_from_schema_partition(const schema_result_value_type& result);
 
-std::vector<mutation> make_create_table_mutations(lw_shared_ptr<keyspace_metadata> keyspace, schema_ptr table, api::timestamp_type timestamp);
+future<std::vector<mutation>> make_drop_type_mutations(lw_shared_ptr<keyspace_metadata> keyspace, user_type type, api::timestamp_type timestamp);
+
+void add_type_to_schema_mutation(user_type type, api::timestamp_type timestamp, std::vector<mutation>& mutations);
+
+future<std::vector<mutation>> make_create_table_mutations(lw_shared_ptr<keyspace_metadata> keyspace, schema_ptr table, api::timestamp_type timestamp);
+
+future<std::vector<mutation>> make_update_table_mutations(
+    lw_shared_ptr<keyspace_metadata> keyspace,
+    schema_ptr old_table,
+    schema_ptr new_table,
+    api::timestamp_type timestamp,
+    bool from_thrift);
 
 future<std::map<sstring, schema_ptr>> create_tables_from_tables_partition(distributed<service::storage_proxy>& proxy, const schema_result::mapped_type& result);
 
-void add_table_to_schema_mutation(schema_ptr table, api::timestamp_type timestamp, bool with_columns_and_triggers, const partition_key& pkey, std::vector<mutation>& mutations);
-    
-future<schema_ptr> create_table_from_name(distributed<service::storage_proxy>& proxy, const sstring& keyspace, const sstring& table);
+future<std::vector<mutation>> make_drop_table_mutations(lw_shared_ptr<keyspace_metadata> keyspace, schema_ptr table, api::timestamp_type timestamp);
 
-future<schema_ptr> create_table_from_table_row(distributed<service::storage_proxy>& proxy, const query::result_set_row& row);
+schema_ptr create_table_from_mutations(schema_mutations, std::experimental::optional<table_schema_version> version = {});
 
-void create_table_from_table_row_and_column_rows(schema_builder& builder, const query::result_set_row& table_row, const schema_result::mapped_type& serialized_columns);
+view_ptr create_view_from_mutations(schema_mutations, std::experimental::optional<table_schema_version> version = {});
 
-future<schema_ptr> create_table_from_table_partition(distributed<service::storage_proxy>& proxy, lw_shared_ptr<query::result_set>&& partition);
+future<std::vector<view_ptr>> create_views_from_schema_partition(distributed<service::storage_proxy>& proxy, const schema_result::mapped_type& result);
 
-std::vector<column_definition> create_columns_from_column_rows(const schema_result::mapped_type& rows,
-                                                               const sstring& keyspace,
-                                                               const sstring& table,/*,
-                                                               AbstractType<?> rawComparator, */
-                                                               bool is_super);
+schema_mutations make_schema_mutations(schema_ptr s, api::timestamp_type timestamp, bool with_columns);
+mutation make_scylla_tables_mutation(schema_ptr, api::timestamp_type timestamp);
 
-column_definition create_column_from_column_row(const query::result_set_row& row,
-                                                sstring keyspace,
-                                                sstring table, /*,
-                                                AbstractType<?> rawComparator, */
-                                                bool is_super);
+void add_table_or_view_to_schema_mutation(schema_ptr view, api::timestamp_type timestamp, bool with_columns, std::vector<mutation>& mutations);
 
+future<std::vector<mutation>> make_create_view_mutations(lw_shared_ptr<keyspace_metadata> keyspace, view_ptr view, api::timestamp_type timestamp);
 
-void add_column_to_schema_mutation(schema_ptr table, const column_definition& column, api::timestamp_type timestamp, const partition_key& pkey, std::vector<mutation>& mutations);
+future<std::vector<mutation>> make_update_view_mutations(lw_shared_ptr<keyspace_metadata> keyspace, view_ptr old_view, view_ptr new_view, api::timestamp_type timestamp, bool include_base);
+
+future<std::vector<mutation>> make_drop_view_mutations(lw_shared_ptr<keyspace_metadata> keyspace, view_ptr view, api::timestamp_type timestamp);
 
 sstring serialize_kind(column_kind kind);
 column_kind deserialize_kind(sstring kind);
 data_type parse_type(sstring str);
+
+sstring serialize_index_kind(index_metadata_kind kind);
+index_metadata_kind deserialize_index_kind(sstring kind);
+
+mutation compact_for_schema_digest(const mutation& m);
+
+template<typename Hasher>
+void feed_hash_for_schema_digest(Hasher& h, const mutation& m) {
+    feed_hash(h, compact_for_schema_digest(m));
+}
 
 } // namespace schema_tables
 } // namespace db

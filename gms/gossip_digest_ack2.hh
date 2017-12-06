@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -38,7 +38,6 @@
 
 #pragma once
 
-#include "types.hh"
 #include "utils/serialization.hh"
 #include "gms/gossip_digest.hh"
 #include "gms/inet_address.hh"
@@ -65,12 +64,9 @@ public:
         return _map;
     }
 
-    // The following replaces GossipDigestAck2Serializer from the Java code
-    void serialize(bytes::iterator& out) const;
-
-    static gossip_digest_ack2 deserialize(bytes_view& v);
-
-    size_t serialized_size() const;
+    const std::map<inet_address, endpoint_state>& get_endpoint_state_map() const {
+        return _map;
+    }
 
     friend std::ostream& operator<<(std::ostream& os, const gossip_digest_ack2& ack2);
 };

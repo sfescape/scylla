@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -51,45 +51,50 @@
 
 namespace utils {
 namespace filter {
-static thread_local auto reusable_indexes = std::vector<long>();
 
-void bloom_filter::set_indexes(int64_t base, int64_t inc, int count, long max, std::vector<long>& results) {
+template<typename Func>
+void for_each_index(hashed_key hk, int count, int64_t max, Func&& func) {
+    auto h = hk.hash();
+    int64_t base = h[0];
+    int64_t inc = h[1];
     for (int i = 0; i < count; i++) {
-        results[i] = abs(base % max);
+        if (func(std::abs(base % max)) == stop_iteration::yes) {
+            break;
+        }
         base = static_cast<int64_t>(static_cast<uint64_t>(base) + static_cast<uint64_t>(inc));
     }
 }
 
-std::vector<long> bloom_filter::get_hash_buckets(const bytes_view& key, int hash_count, long max) {
-    std::array<uint64_t, 2> h;
-    hash(key, 0, h);
-
-    auto indexes = std::vector<long>();
-
-    indexes.resize(hash_count);
-    set_indexes(h[0], h[1], hash_count, max, indexes);
-    return indexes;
+bool bloom_filter::is_present(hashed_key key) {
+    bool result = true;
+    for_each_index(key, _hash_count, _bitset.size(), [this, &result] (auto i) {
+        if (!_bitset.test(i)) {
+            result = false;
+            return stop_iteration::yes;
+        }
+        return stop_iteration::no;
+    });
+    return result;
 }
 
-std::vector<long> bloom_filter::indexes(const bytes_view& key) {
-    // we use the same array both for storing the hash result, and for storing the indexes we return,
-    // so that we do not need to allocate two arrays.
-    auto& idx = reusable_indexes;
-    std::array<uint64_t, 2> h;
-    hash(key, 0, h);
+void bloom_filter::add(const bytes_view& key) {
+    for_each_index(make_hashed_key(key), _hash_count, _bitset.size(), [this] (auto i) {
+        _bitset.set(i);
+        return stop_iteration::no;
+    });
+}
 
-    idx.resize(_hash_count);
-    set_indexes(h[0], h[1], _hash_count, _bitset.size(), idx);
-    return idx;
+bool bloom_filter::is_present(const bytes_view& key) {
+    return is_present(make_hashed_key(key));
 }
 
 filter_ptr create_filter(int hash, large_bitset&& bitset) {
     return std::make_unique<murmur3_bloom_filter>(hash, std::move(bitset));
 }
 
-filter_ptr create_filter(int hash, long num_elements, int buckets_per) {
-    long num_bits = (num_elements * buckets_per) + bloom_calculations::EXCESS;
-    num_bits = align_up<long>(num_bits, 64);  // Seems to be implied in origin
+filter_ptr create_filter(int hash, int64_t num_elements, int buckets_per) {
+    int64_t num_bits = (num_elements * buckets_per) + bloom_calculations::EXCESS;
+    num_bits = align_up<int64_t>(num_bits, 64);  // Seems to be implied in origin
     large_bitset bitset(num_bits);
     return std::make_unique<murmur3_bloom_filter>(hash, std::move(bitset));
 }

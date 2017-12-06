@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -75,6 +75,8 @@ public:
     bool is_reversed_type() const {
         return ::dynamic_pointer_cast<const reversed_type_impl>(type) != nullptr;
     }
+
+    static bool all_in_same_table(const std::vector<::shared_ptr<column_specification>>& names);
 };
 
 }

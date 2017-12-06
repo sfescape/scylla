@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -69,9 +69,9 @@ public:
     * @param rs the <code>ResultSetBuilder</code>
     * @throws InvalidRequestException
     */
-    virtual void add_input_row(serialization_format sf, result_set_builder& rs) = 0;
+    virtual void add_input_row(cql_serialization_format sf, result_set_builder& rs) = 0;
 
-    virtual std::vector<bytes_opt> get_output_row(serialization_format sf) = 0;
+    virtual std::vector<bytes_opt> get_output_row(cql_serialization_format sf) = 0;
 
     virtual void reset() = 0;
 };
@@ -134,7 +134,7 @@ public:
      * @return <code>true</code> if this selection contains a collection, <code>false</code> otherwise.
      */
     bool contains_a_collection() const {
-        if (!_schema->has_collections()) {
+        if (!_schema->has_multi_cell_collections()) {
             return false;
         }
 
@@ -161,7 +161,7 @@ public:
         return std::find(_columns.begin(), _columns.end(), &def) != _columns.end();
     }
 
-    ::shared_ptr<metadata> get_result_metadata() {
+    ::shared_ptr<const metadata> get_result_metadata() const {
         return _metadata;
     }
 
@@ -186,16 +186,16 @@ private:
 public:
     static ::shared_ptr<selection> from_selectors(database& db, schema_ptr schema, const std::vector<::shared_ptr<raw_selector>>& raw_selectors);
 
-    virtual std::unique_ptr<selectors> new_selectors() = 0;
+    virtual std::unique_ptr<selectors> new_selectors() const = 0;
 
     /**
      * Returns a range of CQL3 columns this selection needs.
      */
-    auto const& get_columns() {
+    auto const& get_columns() const {
         return _columns;
     }
 
-    uint32_t get_column_count() {
+    uint32_t get_column_count() const {
         return _columns.size();
     }
 
@@ -235,18 +235,42 @@ public:
 private:
     std::vector<api::timestamp_type> _timestamps;
     std::vector<int32_t> _ttls;
-    const db_clock::time_point _now;
-    serialization_format _serialization_format;
+    const gc_clock::time_point _now;
+    cql_serialization_format _cql_serialization_format;
 public:
-    result_set_builder(selection& s, db_clock::time_point now, serialization_format sf);
+    result_set_builder(const selection& s, gc_clock::time_point now, cql_serialization_format sf);
     void add_empty();
     void add(bytes_opt value);
     void add(const column_definition& def, const query::result_atomic_cell_view& c);
-    void add(const column_definition& def, collection_mutation::view c);
+    void add_collection(const column_definition& def, bytes_view c);
     void new_row();
     std::unique_ptr<result_set> build();
     api::timestamp_type timestamp_of(size_t idx);
     int32_t ttl_of(size_t idx);
+    
+    // Implements ResultVisitor concept from query.hh
+    class visitor {
+    protected:
+        result_set_builder& _builder;
+        const schema& _schema;
+        const selection& _selection;
+        uint32_t _row_count;
+        std::vector<bytes> _partition_key;
+        std::vector<bytes> _clustering_key;
+    public:
+        visitor(cql3::selection::result_set_builder& builder, const schema& s, const selection&);
+        visitor(visitor&&) = default;
+
+        void add_value(const column_definition& def, query::result_row_view::iterator_type& i);
+        void accept_new_partition(const partition_key& key, uint32_t row_count);
+        void accept_new_partition(uint32_t row_count);
+        void accept_new_row(const clustering_key& key,
+                const query::result_row_view& static_row,
+                const query::result_row_view& row);
+        void accept_new_row(const query::result_row_view& static_row,
+                const query::result_row_view& row);
+        void accept_partition_end(const query::result_row_view& static_row);
+    };
 private:
     bytes_opt get_value(data_type t, query::result_atomic_cell_view c);
 };

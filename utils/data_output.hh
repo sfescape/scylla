@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Cloudius Systems
+ * Copyright (C) 2014 ScyllaDB
  */
 
 /*
@@ -57,27 +57,27 @@ public:
     }
 
     template<typename T>
-    static inline std::enable_if_t<std::is_fundamental<T>::value, size_t> serialized_size(const T&) {
-        return sizeof(T);
-    }
+    static inline std::enable_if_t<std::is_fundamental<T>::value, size_t> serialized_size(const T&);
     template<typename T>
-    static inline std::enable_if_t<std::is_fundamental<T>::value, size_t> serialized_size() {
-        return sizeof(T);
-    }
+    static inline std::enable_if_t<std::is_fundamental<T>::value, size_t> serialized_size();
+
+    template<typename SizeType = uint16_t>
     static inline size_t serialized_size(const sstring& s) {
-        if (s.size() > std::numeric_limits<uint16_t>::max()) {
+        if (s.size() > std::numeric_limits<SizeType>::max()) {
             throw std::out_of_range("String too large");
         }
-        return sizeof(uint16_t) + s.size();
+        return sizeof(SizeType) + s.size();
     }
+    template<typename SizeType = uint32_t>
     static inline size_t serialized_size(const bytes_view& s) {
-        if (s.size() > std::numeric_limits<uint32_t>::max()) {
+        if (s.size() > std::numeric_limits<SizeType>::max()) {
             throw std::out_of_range("Buffer too large");
         }
-        return sizeof(uint32_t) + s.size();
+        return sizeof(SizeType) + s.size();
     }
+    template<typename SizeType = uint32_t>
     static inline size_t serialized_size(const bytes& s) {
-        return serialized_size(bytes_view(s));
+        return serialized_size<SizeType>(bytes_view(s));
     }
 
     size_t avail() const {
@@ -93,24 +93,32 @@ public:
         _ptr += s;
         return *this;
     }
+    char* reserve(size_t s) {
+        auto p = _ptr;
+        skip(s);
+        return p;
+    }
 
     template<typename T>
     inline std::enable_if_t<std::is_fundamental<T>::value, data_output&> write(T t);
 
+    template<typename SizeType = uint16_t>
     data_output& write(const sstring& s) {
-        ensure(serialized_size(s));
-        write(uint16_t(s.size()));
+        ensure(serialized_size<SizeType>(s));
+        write(SizeType(s.size()));
         _ptr = std::copy(s.begin(), s.end(), _ptr);
         return *this;
     }
+    template<typename SizeType = uint32_t>
     data_output& write(const bytes_view& s) {
-        ensure(serialized_size(s));
-        write(uint32_t(s.size()));
+        ensure(serialized_size<SizeType>(s));
+        write(SizeType(s.size()));
         _ptr = std::copy(s.begin(), s.end(), _ptr);
         return *this;
     }
+    template<typename SizeType = uint32_t>
     data_output& write(const bytes & s) {
-        return write(bytes_view(s));
+        return write<SizeType>(bytes_view(s));
     }
     template<typename Iter>
     data_output& write(Iter s, Iter e) {
@@ -131,10 +139,28 @@ public:
         }
         return *this;
     }
+    data_output& write_view(bytes_view v) {
+        return write(v.begin(), v.end());
+    }
 private:
     char * _ptr;
     char * _end;
 };
+
+template<>
+inline size_t data_output::serialized_size<bool>() {
+    return sizeof(uint8_t);
+}
+
+template<typename T>
+inline std::enable_if_t<std::is_fundamental<T>::value, size_t> data_output::serialized_size() {
+    return sizeof(T);
+}
+
+template<typename T>
+inline std::enable_if_t<std::is_fundamental<T>::value, size_t> data_output::serialized_size(const T&) {
+    return serialized_size<T>();
+}
 
 template<>
 inline data_output& data_output::write(bool b) {

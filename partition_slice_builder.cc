@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -30,7 +30,8 @@ partition_slice_builder::partition_slice_builder(const schema& schema)
 {
     _options.set<query::partition_slice::option::send_partition_key>();
     _options.set<query::partition_slice::option::send_clustering_key>();
-    _options.set<query::partition_slice::option::send_timestamp_and_expiry>();
+    _options.set<query::partition_slice::option::send_timestamp>();
+    _options.set<query::partition_slice::option::send_expiry>();
 }
 
 query::partition_slice
@@ -76,6 +77,18 @@ partition_slice_builder::with_range(query::clustering_range range) {
 }
 
 partition_slice_builder&
+partition_slice_builder::with_ranges(std::vector<query::clustering_range> ranges) {
+    if (!_row_ranges) {
+        _row_ranges = std::move(ranges);
+    } else {
+        for (auto&& r : ranges) {
+            with_range(std::move(r));
+        }
+    }
+    return *this;
+}
+
+partition_slice_builder&
 partition_slice_builder::with_no_regular_columns() {
     _regular_columns = std::vector<column_id>();
     return *this;
@@ -92,7 +105,7 @@ partition_slice_builder::with_regular_column(bytes name) {
         throw std::runtime_error(sprint("No such column: %s", _schema.regular_column_name_type()->to_string(name)));
     }
     if (!def->is_regular()) {
-        throw std::runtime_error(sprint("Column is not regular: %s", _schema.regular_column_name_type()->to_string(name)));
+        throw std::runtime_error(sprint("Column is not regular: %s", _schema.column_name_type(*def)->to_string(name)));
     }
     _regular_columns->push_back(def->id);
     return *this;
@@ -118,5 +131,23 @@ partition_slice_builder::with_static_column(bytes name) {
         throw std::runtime_error(sprint("Column is not static: %s", utf8_type->to_string(name)));
     }
     _static_columns->push_back(def->id);
+    return *this;
+}
+
+partition_slice_builder&
+partition_slice_builder::reversed() {
+    _options.set<query::partition_slice::option::reversed>();
+    return *this;
+}
+
+partition_slice_builder&
+partition_slice_builder::without_partition_key_columns() {
+    _options.remove<query::partition_slice::option::send_partition_key>();
+    return *this;
+}
+
+partition_slice_builder&
+partition_slice_builder::without_clustering_key_columns() {
+    _options.remove<query::partition_slice::option::send_clustering_key>();
     return *this;
 }

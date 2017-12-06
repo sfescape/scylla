@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -42,8 +42,9 @@
 #pragma once
 
 #include <cstddef>
-#include <iostream>
+#include <iosfwd>
 #include "core/sstring.hh"
+#include "seastarx.hh"
 
 namespace cql3 {
 
@@ -58,6 +59,7 @@ public:
     static const operator_type CONTAINS;
     static const operator_type CONTAINS_KEY;
     static const operator_type NEQ;
+    static const operator_type IS_NOT;
 private:
     int32_t _b;
     const operator_type& _reverse;
@@ -69,7 +71,12 @@ private:
         , _text(std::move(text))
     {}
 public:
+    operator_type(const operator_type&) = delete;
+    operator_type& operator=(const operator_type&) = delete;
     const operator_type& reverse() const { return _reverse; }
+    bool is_slice() const {
+        return (*this == LT) || (*this == LTE) || (*this == GT) || (*this == GTE);
+    }
     sstring to_string() const { return _text; }
     bool operator==(const operator_type& other) const { return this == &other; }
     bool operator!=(const operator_type& other) const { return this != &other; }

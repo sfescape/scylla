@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -39,9 +39,9 @@
 #pragma once
 
 #include "gms/version_generator.hh"
-#include "types.hh"
 #include "utils/serialization.hh"
 #include <ostream>
+#include <limits>
 
 namespace gms {
 /**
@@ -66,7 +66,7 @@ public:
         , _version(ver) {
     }
 
-    int32_t get_generation() {
+    int32_t get_generation() const {
         return _generation;
     }
 
@@ -74,7 +74,7 @@ public:
         _version = version_generator::get_next_version();
     }
 
-    int32_t get_heart_beat_version() {
+    int32_t get_heart_beat_version() const {
         return _version;
     }
 
@@ -82,24 +82,12 @@ public:
         _generation += 1;
     }
 
+    void force_highest_possible_version_unsafe() {
+        _version = std::numeric_limits<int32_t>::max();
+    }
+
     friend inline std::ostream& operator<<(std::ostream& os, const heart_beat_state& h) {
-        return os << "generation = " << h._generation << ", version = " << h._version;
-    }
-
-    // The following replaces HeartBeatStateSerializer from the Java code
-    void serialize(bytes::iterator& out) const {
-        serialize_int32(out, _generation);
-        serialize_int32(out, _version);
-    }
-
-    static heart_beat_state deserialize(bytes_view& v) {
-        auto generation = read_simple<int32_t>(v);
-        auto version = read_simple<int32_t>(v);
-        return heart_beat_state(generation, version);
-    }
-
-    size_t serialized_size() const {
-        return serialize_int32_size + serialize_int32_size;
+        return os << "{ generation = " << h._generation << ", version = " << h._version << " }";
     }
 };
 

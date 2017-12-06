@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -24,17 +24,27 @@
 #include "murmur3_partitioner.hh"
 #include "utils/class_registrator.hh"
 #include "types.hh"
+#include "utils/murmur_hash.hh"
+#include "utils/div_ceil.hh"
+#include <deque>
+#include <boost/range/adaptor/map.hpp>
+#include <boost/range/irange.hpp>
+#include <boost/range/adaptor/transformed.hpp>
+#include "sstables/key.hh"
 
 namespace dht {
 
-token
+static const token min_token{ token::kind::before_all_keys, {} };
+static const token max_token{ token::kind::after_all_keys, {} };
+
+const token&
 minimum_token() {
-    return { token::kind::before_all_keys, {} };
+    return min_token;
 }
 
-token
+const token&
 maximum_token() {
-    return { token::kind::after_all_keys, {} };
+    return max_token;
 }
 
 // result + overflow bit
@@ -103,29 +113,6 @@ midpoint_unsigned_tokens(const token& t1, const token& t2) {
     return token{token::kind::key, std::move(avg)};
 }
 
-static inline unsigned char get_byte(bytes_view b, size_t off) {
-    if (off < b.size()) {
-        return b[off];
-    } else {
-        return 0;
-    }
-}
-
-int i_partitioner::tri_compare(const token& t1, const token& t2) {
-    size_t sz = std::max(t1._data.size(), t2._data.size());
-
-    for (size_t i = 0; i < sz; i++) {
-        auto b1 = get_byte(t1._data, i);
-        auto b2 = get_byte(t2._data, i);
-        if (b1 < b2) {
-            return -1;
-        } else if (b1 > b2) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 int tri_compare(const token& t1, const token& t2) {
     if (t1._kind == t2._kind) {
         return global_partitioner().tri_compare(t1, t2);
@@ -161,12 +148,7 @@ std::ostream& operator<<(std::ostream& out, const token& t) {
     } else if (t._kind == token::kind::before_all_keys) {
         out << "minimum token";
     } else {
-        auto flags = out.flags();
-        for (auto c : t._data) {
-            unsigned char x = c;
-            out << std::hex << std::setw(2) << std::setfill('0') << +x << " ";
-        }
-        out.flags(flags);
+        out << global_partitioner().to_sstring(t);
     }
     return out;
 }
@@ -176,15 +158,25 @@ std::ostream& operator<<(std::ostream& out, const decorated_key& dk) {
 }
 
 // FIXME: make it per-keyspace
-std::unique_ptr<i_partitioner> default_partitioner { new murmur3_partitioner };
+std::unique_ptr<i_partitioner> default_partitioner;
 
-void set_global_partitioner(const sstring& class_name)
+void set_global_partitioner(const sstring& class_name, unsigned ignore_msb)
 {
-    default_partitioner = create_object<i_partitioner>(class_name);
+    try {
+        default_partitioner = create_object<i_partitioner, const unsigned&, const unsigned&>(class_name, smp::count, ignore_msb);
+    } catch (std::exception& e) {
+        auto supported_partitioners = ::join(", ", class_registry<i_partitioner>::classes() |
+                boost::adaptors::map_keys);
+        throw std::runtime_error(sprint("Partitioner %s is not supported, supported partitioners = { %s } : %s",
+                class_name, supported_partitioners, e.what()));
+    }
 }
 
 i_partitioner&
 global_partitioner() {
+    if (!default_partitioner) {
+        default_partitioner = std::make_unique<murmur3_partitioner>(smp::count, 12);
+    }
     return *default_partitioner;
 }
 
@@ -256,68 +248,211 @@ std::ostream& operator<<(std::ostream& out, const ring_position& pos) {
     return out << "}";
 }
 
-size_t ring_position::serialized_size() const {
-    size_t size = serialize_int32_size; /* _key length */
-    if (_key) {
-        size += _key.value().representation().size();
-    } else {
-        size += sizeof(int8_t); /* _token_bund */
+std::ostream& operator<<(std::ostream& out, ring_position_view pos) {
+    out << "{" << *pos._token;
+    if (pos._key) {
+        out << ", " << *pos._key;
     }
-    return size + _token.serialized_size();
-}
-
-void ring_position::serialize(bytes::iterator& out) const {
-    _token.serialize(out);
-    if (_key) {
-        auto v = _key.value().representation();
-        serialize_int32(out, v.size());
-        out = std::copy(v.begin(), v.end(), out);
-    } else {
-        serialize_int32(out, 0);
-        serialize_int8(out, static_cast<int8_t>(_token_bound));
-    }
-}
-
-ring_position ring_position::deserialize(bytes_view& in) {
-    auto token = token::deserialize(in);
-    auto size = read_simple<uint32_t>(in);
-    if (size == 0) {
-        auto bound = dht::ring_position::token_bound(read_simple<int8_t>(in));
-        return ring_position(std::move(token), bound);
-    } else {
-        return ring_position(std::move(token), partition_key::from_bytes(to_bytes(read_simple_bytes(in, size))));
-    }
+    out << ", w=" << static_cast<int>(pos._weight);
+    return out << "}";
 }
 
 unsigned shard_of(const token& t) {
     return global_partitioner().shard_of(t);
 }
 
-int ring_position_comparator::operator()(const ring_position& lh, const ring_position& rh) const {
-    return lh.tri_compare(s, rh);
+stdx::optional<dht::token_range>
+selective_token_range_sharder::next() {
+    if (_done) {
+        return {};
+    }
+    while (_range.overlaps(dht::token_range(_start_boundary, {}), dht::token_comparator())
+            && !(_start_boundary && _start_boundary->value() == maximum_token())) {
+        auto end_token = _partitioner.token_for_next_shard(_start_token, _next_shard);
+        auto candidate = dht::token_range(std::move(_start_boundary), range_bound<dht::token>(end_token, false));
+        auto intersection = _range.intersection(std::move(candidate), dht::token_comparator());
+        _start_token = _partitioner.token_for_next_shard(end_token, _shard);
+        _start_boundary = range_bound<dht::token>(_start_token);
+        if (intersection) {
+            return *intersection;
+        }
+    }
+
+    _done = true;
+    return {};
 }
 
-void token::serialize(bytes::iterator& out) const {
-    uint8_t kind = _kind == dht::token::kind::before_all_keys ? 0 :
-                   _kind == dht::token::kind::key ? 1 : 2;
-    serialize_int8(out, kind);
-    serialize_int16(out, _data.size());
-    out = std::copy(_data.begin(), _data.end(), out);
+stdx::optional<ring_position_range_and_shard>
+ring_position_range_sharder::next(const schema& s) {
+    if (_done) {
+        return {};
+    }
+    auto shard = _range.start() ? _partitioner.shard_of(_range.start()->value().token()) : _partitioner.shard_of_minimum_token();
+    auto next_shard = shard + 1 < _partitioner.shard_count() ? shard + 1 : 0;
+    auto shard_boundary_token = _partitioner.token_for_next_shard(_range.start() ? _range.start()->value().token() : minimum_token(), next_shard);
+    auto shard_boundary = ring_position::starting_at(shard_boundary_token);
+    if ((!_range.end() || shard_boundary.less_compare(s, _range.end()->value()))
+            && shard_boundary_token != maximum_token()) {
+        // split the range at end_of_shard
+        auto start = _range.start();
+        auto end = range_bound<ring_position>(shard_boundary, false);
+        _range = dht::partition_range(
+                range_bound<ring_position>(std::move(shard_boundary), true),
+                std::move(_range.end()));
+        return ring_position_range_and_shard{dht::partition_range(std::move(start), std::move(end)), shard};
+    }
+    _done = true;
+    return ring_position_range_and_shard{std::move(_range), shard};
 }
 
-token token::deserialize(bytes_view& in) {
-    uint8_t kind = read_simple<uint8_t>(in);
-    size_t size = read_simple<uint16_t>(in);
-    return token(kind == 0 ? dht::token::kind::before_all_keys :
-                 kind == 1 ? dht::token::kind::key :
-                             dht::token::kind::after_all_keys,
-                 to_bytes(read_simple_bytes(in, size)));
+
+ring_position_exponential_sharder::ring_position_exponential_sharder(const i_partitioner& partitioner, partition_range pr)
+        : _partitioner(partitioner)
+        , _range(std::move(pr))
+        , _last_ends(_partitioner.shard_count()) {
+    if (_range.start()) {
+        _first_shard = _next_shard = _partitioner.shard_of(_range.start()->value().token());
+    }
 }
 
-size_t token::serialized_size() const {
-    return serialize_int8_size // token::kind;
-         + serialize_int16_size // token size
-         + _data.size();
+ring_position_exponential_sharder::ring_position_exponential_sharder(partition_range pr)
+        : ring_position_exponential_sharder(global_partitioner(), std::move(pr)) {
+}
+
+stdx::optional<ring_position_exponential_sharder_result>
+ring_position_exponential_sharder::next(const schema& s) {
+    auto ret = ring_position_exponential_sharder_result{};
+    ret.per_shard_ranges.reserve(std::min(_spans_per_iteration, _partitioner.shard_count()));
+    ret.inorder = _spans_per_iteration <= _partitioner.shard_count();
+    unsigned spans_to_go = _spans_per_iteration;
+    auto cmp = ring_position_comparator(s);
+    auto spans_per_shard = _spans_per_iteration / _partitioner.shard_count();
+    auto shards_with_extra_span = _spans_per_iteration % _partitioner.shard_count();
+    auto first_shard = _next_shard;
+    _next_shard = (_next_shard + _spans_per_iteration) % _partitioner.shard_count();
+    for (auto i : boost::irange(0u, std::min(_partitioner.shard_count(), _spans_per_iteration))) {
+        auto shard = (first_shard + i) % _partitioner.shard_count();
+        if (_last_ends[shard] && *_last_ends[shard] == maximum_token()) {
+            continue;
+        }
+        range_bound<ring_position> this_shard_start = [&] {
+            if (_last_ends[shard]) {
+                return range_bound<ring_position>(ring_position::starting_at(*_last_ends[shard]));
+            } else {
+                return _range.start().value_or(range_bound<ring_position>(ring_position::starting_at(minimum_token())));
+            }
+        }();
+        // token_for_next_span() may give us the wrong boundary on the first pass, so add an extra span:
+        auto extra_span = !_last_ends[shard] && shard != _first_shard;
+        auto spans = spans_per_shard + unsigned(i < shards_with_extra_span);
+        auto boundary = _partitioner.token_for_next_shard(this_shard_start.value().token(), shard, spans + extra_span);
+        auto proposed_range = partition_range(this_shard_start, range_bound<ring_position>(ring_position::starting_at(boundary), false));
+        auto intersection = _range.intersection(proposed_range, cmp);
+        if (!intersection) {
+            continue;
+        }
+        spans_to_go -= spans;
+        auto this_shard_result = ring_position_range_and_shard{std::move(*intersection), shard};
+        _last_ends[shard] = boundary;
+        ret.per_shard_ranges.push_back(std::move(this_shard_result));
+    }
+    if (ret.per_shard_ranges.empty()) {
+        return stdx::nullopt;
+    }
+    _spans_per_iteration *= 2;
+    return stdx::make_optional(std::move(ret));
+}
+
+
+ring_position_exponential_vector_sharder::ring_position_exponential_vector_sharder(const std::vector<nonwrapping_range<ring_position>>&& ranges) {
+    std::move(ranges.begin(), ranges.end(), std::back_inserter(_ranges));
+    if (!_ranges.empty()) {
+        _current_sharder.emplace(_ranges.front());
+        _ranges.pop_front();
+        ++_element;
+    }
+}
+
+stdx::optional<ring_position_exponential_vector_sharder_result>
+ring_position_exponential_vector_sharder::next(const schema& s) {
+    if (!_current_sharder) {
+        return stdx::nullopt;
+    }
+    while (true) {  // yuch
+        auto ret = _current_sharder->next(s);
+        if (ret) {
+            auto augmented = ring_position_exponential_vector_sharder_result{std::move(*ret), _element};
+            return stdx::make_optional(std::move(augmented));
+        }
+        if (_ranges.empty()) {
+            _current_sharder = stdx::nullopt;
+            return stdx::nullopt;
+        }
+        _current_sharder.emplace(_ranges.front());
+        _ranges.pop_front();
+        ++_element;
+    }
+}
+
+
+ring_position_range_vector_sharder::ring_position_range_vector_sharder(dht::partition_range_vector ranges)
+        : _ranges(std::move(ranges))
+        , _current_range(_ranges.begin()) {
+    next_range();
+}
+
+stdx::optional<ring_position_range_and_shard_and_element>
+ring_position_range_vector_sharder::next(const schema& s) {
+    if (!_current_sharder) {
+        return stdx::nullopt;
+    }
+    auto range_and_shard = _current_sharder->next(s);
+    while (!range_and_shard && _current_range != _ranges.end()) {
+        next_range();
+        range_and_shard = _current_sharder->next(s);
+    }
+    auto ret = stdx::optional<ring_position_range_and_shard_and_element>();
+    if (range_and_shard) {
+        ret.emplace(std::move(*range_and_shard), _current_range - _ranges.begin() - 1);
+    }
+    return ret;
+}
+
+
+std::deque<partition_range>
+split_range_to_single_shard(const i_partitioner& partitioner, const schema& s, const partition_range& pr, shard_id shard) {
+    auto cmp = ring_position_comparator(s);
+    auto ret = std::deque<partition_range>();
+    auto next_shard = shard + 1 == partitioner.shard_count() ? 0 : shard + 1;
+    auto start_token = pr.start() ? pr.start()->value().token() : minimum_token();
+    auto start_shard = partitioner.shard_of(start_token);
+    auto start_boundary = start_shard == shard ? pr.start() : range_bound<ring_position>(ring_position::starting_at(partitioner.token_for_next_shard(start_token, shard)));
+    while (pr.overlaps(partition_range(start_boundary, {}), cmp)
+            && !(start_boundary && start_boundary->value().token() == maximum_token())) {
+        auto end_token = partitioner.token_for_next_shard(start_token, next_shard);
+        auto candidate = partition_range(std::move(start_boundary), range_bound<ring_position>(ring_position::starting_at(end_token), false));
+        auto intersection = pr.intersection(std::move(candidate), cmp);
+        if (intersection) {
+            ret.push_back(std::move(*intersection));
+        }
+        start_token = partitioner.token_for_next_shard(end_token, shard);
+        start_boundary = range_bound<ring_position>(ring_position::starting_at(start_token));
+    }
+    return ret;
+}
+
+std::deque<partition_range>
+split_range_to_single_shard(const schema& s, const partition_range& pr, shard_id shard) {
+    return split_range_to_single_shard(global_partitioner(), s, pr, shard);
+}
+
+
+int ring_position::tri_compare(const schema& s, const ring_position& o) const {
+    return ring_position_comparator(s)(*this, o);
+}
+
+int token_comparator::operator()(const token& t1, const token& t2) const {
+    return tri_compare(t1, t2);
 }
 
 bool ring_position::equal(const schema& s, const ring_position& other) const {
@@ -328,22 +463,103 @@ bool ring_position::less_compare(const schema& s, const ring_position& other) co
     return tri_compare(s, other) < 0;
 }
 
-int ring_position::tri_compare(const schema& s, const ring_position& o) const {
-    if (_token != o._token) {
-        return _token < o._token ? -1 : 1;
+int ring_position_comparator::operator()(ring_position_view lh, ring_position_view rh) const {
+    auto token_cmp = tri_compare(*lh._token, *rh._token);
+    if (token_cmp) {
+        return token_cmp;
     }
-
-    if (_key && o._key) {
-        return _key->legacy_tri_compare(s, *o._key);
+    if (lh._key && rh._key) {
+        auto c = lh._key->legacy_tri_compare(s, *rh._key);
+        if (c) {
+            return c;
+        }
+        return lh._weight - rh._weight;
     }
-
-    if (!_key && !o._key) {
-        return relation_to_keys() - o.relation_to_keys();
-    } else if (!_key) {
-        return relation_to_keys();
+    if (!lh._key && !rh._key) {
+        return lh._weight - rh._weight;
+    } else if (!lh._key) {
+        return lh._weight > 0 ? 1 : -1;
     } else {
-        return -o.relation_to_keys();
+        return rh._weight > 0 ? -1 : 1;
     }
+}
+
+int ring_position_comparator::operator()(ring_position_view lh, sstables::decorated_key_view rh) const {
+    auto token_cmp = tri_compare(*lh._token, rh.token());
+    if (token_cmp) {
+        return token_cmp;
+    }
+    if (lh._key) {
+        auto rel = rh.key().tri_compare(s, *lh._key);
+        if (rel) {
+            return -rel;
+        }
+    }
+    return lh._weight;
+}
+
+int ring_position_comparator::operator()(sstables::decorated_key_view a, ring_position_view b) const {
+    return -(*this)(b, a);
+}
+
+dht::partition_range
+to_partition_range(dht::token_range r) {
+    using bound_opt = std::experimental::optional<dht::partition_range::bound>;
+    auto start = r.start()
+                 ? bound_opt(dht::ring_position(r.start()->value(),
+                                                r.start()->is_inclusive()
+                                                ? dht::ring_position::token_bound::start
+                                                : dht::ring_position::token_bound::end))
+                 : bound_opt();
+
+    auto end = r.end()
+               ? bound_opt(dht::ring_position(r.end()->value(),
+                                              r.end()->is_inclusive()
+                                              ? dht::ring_position::token_bound::end
+                                              : dht::ring_position::token_bound::start))
+               : bound_opt();
+
+    return { std::move(start), std::move(end) };
+}
+
+std::map<unsigned, dht::partition_range_vector>
+split_range_to_shards(dht::partition_range pr, const schema& s) {
+    std::map<unsigned, dht::partition_range_vector> ret;
+    auto sharder = dht::ring_position_range_sharder(std::move(pr));
+    auto rprs = sharder.next(s);
+    while (rprs) {
+        ret[rprs->shard].emplace_back(rprs->ring_range);
+        rprs = sharder.next(s);
+    }
+    return ret;
+}
+
+std::map<unsigned, dht::partition_range_vector>
+split_ranges_to_shards(const dht::token_range_vector& ranges, const schema& s) {
+    std::map<unsigned, dht::partition_range_vector> ret;
+    for (const auto& range : ranges) {
+        auto pr = dht::to_partition_range(range);
+        auto sharder = dht::ring_position_range_sharder(std::move(pr));
+        auto rprs = sharder.next(s);
+        while (rprs) {
+            ret[rprs->shard].emplace_back(rprs->ring_range);
+            rprs = sharder.next(s);
+        }
+    }
+    return ret;
+}
+
+}
+
+namespace std {
+
+size_t
+hash<dht::token>::hash_large_token(const managed_bytes& b) const {
+    auto read_bytes = boost::irange<size_t>(0, b.size())
+            | boost::adaptors::transformed([&b] (size_t idx) { return b[idx]; });
+    std::array<uint64_t, 2> result;
+    utils::murmur_hash::hash3_x64_128(read_bytes.begin(), b.size(), 0, result);
+    return result[0];
 }
 
 }

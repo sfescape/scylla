@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -21,21 +21,32 @@
 
 #pragma once
 
+#include <boost/range/adaptor/transformed.hpp>
+
 #include "query-request.hh"
 #include "query-result.hh"
 #include "utils/data_input.hh"
+#include "digest_algorithm.hh"
 
-// Refer to query-result.hh for the query result format
+#include "idl/uuid.dist.hh"
+#include "idl/keys.dist.hh"
+#include "idl/query.dist.hh"
+#include "serializer_impl.hh"
+#include "serialization_visitors.hh"
+#include "idl/query.dist.impl.hh"
+#include "idl/keys.dist.impl.hh"
+#include "idl/uuid.dist.impl.hh"
 
 namespace query {
 
 class result_atomic_cell_view {
     api::timestamp_type _timestamp;
     expiry_opt _expiry;
+    ttl_opt _ttl;
     bytes_view _value;
 public:
-    result_atomic_cell_view(api::timestamp_type timestamp, expiry_opt expiry, bytes_view value)
-        : _timestamp(timestamp), _expiry(expiry), _value(value) { }
+    result_atomic_cell_view(api::timestamp_type timestamp, expiry_opt expiry, ttl_opt ttl, bytes_view value)
+        : _timestamp(timestamp), _expiry(expiry), _ttl(ttl), _value(value) { }
 
     api::timestamp_type timestamp() const {
         return _timestamp;
@@ -43,6 +54,10 @@ public:
 
     expiry_opt expiry() const {
         return _expiry;
+    }
+
+    ttl_opt ttl() const {
+        return _ttl;
     }
 
     bytes_view value() const {
@@ -53,58 +68,48 @@ public:
 // Contains cells in the same order as requested by partition_slice.
 // Contains only live cells.
 class result_row_view {
-    bytes_view _v;
-    const partition_slice& _slice;
+    ser::qr_row_view _v;
 public:
-    result_row_view(bytes_view v, const partition_slice& slice) : _v(v), _slice(slice) {}
+    result_row_view(ser::qr_row_view v) : _v(v) {}
 
     class iterator_type {
-        data_input _in;
-        const partition_slice& _slice;
+        using cells_vec = std::vector<std::experimental::optional<ser::qr_cell_view>>;
+        cells_vec _cells;
+        cells_vec::iterator _i;
+        bytes _tmp_value;
     public:
-        iterator_type(bytes_view v, const partition_slice& slice)
-            : _in(v)
-            , _slice(slice)
+        iterator_type(ser::qr_row_view v)
+            : _cells(v.cells())
+            , _i(_cells.begin())
         { }
         std::experimental::optional<result_atomic_cell_view> next_atomic_cell() {
-            auto present = _in.read<int8_t>();
-            if (!present) {
+            auto cell_opt = *_i++;
+            if (!cell_opt) {
                 return {};
             }
-            api::timestamp_type timestamp = api::missing_timestamp;
-            expiry_opt expiry_;
-            if (_slice.options.contains<partition_slice::option::send_timestamp_and_expiry>()) {
-                timestamp = _in.read <api::timestamp_type> ();
-                auto expiry_rep = _in.read<gc_clock::rep>();
-                if (expiry_rep != std::numeric_limits<gc_clock::rep>::max()) {
-                    expiry_ = gc_clock::time_point(gc_clock::duration(expiry_rep));
-                }
-            }
-            auto value = _in.read_view_to_blob<uint32_t>();
-            return {result_atomic_cell_view(timestamp, expiry_, value)};
+            ser::qr_cell_view v = *cell_opt;
+            api::timestamp_type timestamp = v.timestamp().value_or(api::missing_timestamp);
+            expiry_opt expiry = v.expiry();
+            ttl_opt ttl = v.ttl();
+            _tmp_value = v.value();
+            return {result_atomic_cell_view(timestamp, expiry, ttl, _tmp_value)};
         }
-        std::experimental::optional<collection_mutation::view> next_collection_cell() {
-            auto present = _in.read<int8_t>();
-            if (!present) {
+        std::experimental::optional<bytes_view> next_collection_cell() {
+            auto cell_opt = *_i++;
+            if (!cell_opt) {
                 return {};
             }
-            return collection_mutation::view{_in.read_view_to_blob<uint32_t>()};
+            ser::qr_cell_view v = *cell_opt;
+            _tmp_value = v.value();
+            return {bytes_view(_tmp_value)};
         };
         void skip(const column_definition& def) {
-            if (def.is_atomic()) {
-                next_atomic_cell();
-            } else {
-                next_collection_cell();
-            }
+            ++_i;
         }
     };
 
     iterator_type iterator() const {
-        return iterator_type(_v, _slice);
-    }
-
-    bool empty() const {
-        return _v.empty();
+        return iterator_type(_v);
     }
 };
 
@@ -140,41 +145,58 @@ struct result_visitor {
 };
 
 class result_view {
-    bytes_view _v;
+    ser::query_result_view _v;
+    friend class result_merger;
 public:
-    result_view(bytes_view v) : _v(v) {}
+    result_view(const bytes_ostream& v) : _v(ser::query_result_view{ser::as_input_stream(v)}) {}
+    result_view(ser::query_result_view v) : _v(v) {}
+
+    template <typename Func>
+    static auto do_with(const query::result& res, Func&& func) {
+        result_view view(res.buf());
+        return func(view);
+    }
+
+    template <typename ResultVisitor>
+    static void consume(const query::result& res, const partition_slice& slice, ResultVisitor&& visitor) {
+        do_with(res, [&] (result_view v) {
+            v.consume(slice, visitor);
+        });
+    }
 
     template <typename ResultVisitor>
     void consume(const partition_slice& slice, ResultVisitor&& visitor) {
-        data_input in(_v);
-        while (in.has_next()) {
-            auto row_count = in.read<uint32_t>();
+        for (auto&& p : _v.partitions()) {
+            auto rows = p.rows();
+            auto row_count = rows.size();
             if (slice.options.contains<partition_slice::option::send_partition_key>()) {
-                auto key = partition_key::from_bytes(to_bytes(in.read_view_to_blob<uint32_t>()));
+                auto key = *p.key();
                 visitor.accept_new_partition(key, row_count);
             } else {
                 visitor.accept_new_partition(row_count);
             }
 
-            bytes_view static_row_view;
-            if (!slice.static_columns.empty()) {
-                static_row_view = in.read_view_to_blob<uint32_t>();
-            }
-            result_row_view static_row(static_row_view, slice);
+            result_row_view static_row(p.static_row());
 
-            while (row_count--) {
+            for (auto&& row : rows) {
+                result_row_view view(row.cells());
                 if (slice.options.contains<partition_slice::option::send_clustering_key>()) {
-                    auto key = clustering_key::from_bytes(to_bytes(in.read_view_to_blob<uint32_t>()));
-                    result_row_view row(in.read_view_to_blob<uint32_t>(), slice);
-                    visitor.accept_new_row(key, static_row, row);
+                    visitor.accept_new_row(*row.key(), static_row, view);
                 } else {
-                    result_row_view row(in.read_view_to_blob<uint32_t>(), slice);
-                    visitor.accept_new_row(static_row, row);
+                    visitor.accept_new_row(static_row, view);
                 }
             }
 
             visitor.accept_partition_end(static_row);
         }
+    }
+
+    std::tuple<uint32_t, uint32_t> count_partitions_and_rows() {
+        auto&& ps = _v.partitions();
+        auto rows = boost::accumulate(ps | boost::adaptors::transformed([] (auto& p) {
+            return std::max(p.rows().size(), size_t(1));
+        }), uint32_t(0));
+        return std::make_tuple(ps.size(), rows);
     }
 };
 

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -50,8 +50,8 @@ namespace cql3 {
 /**
  * <code>ErrorListener</code> that collect and enhance the errors send by the CQL lexer and parser.
  */
-template<typename Recognizer>
-class error_collector : public error_listener<Recognizer> {
+template<typename RecognizerType, typename TokenType, typename ExceptionBaseType>
+class error_collector : public error_listener<RecognizerType, ExceptionBaseType> {
     /**
      * The offset of the first token of the snippet.
      */
@@ -67,10 +67,6 @@ class error_collector : public error_listener<Recognizer> {
      */
     const sstring_view _query;
 
-    /**
-     * The error messages.
-     */
-    std::vector<sstring> _error_msgs;
 public:
 
     /**
@@ -81,37 +77,81 @@ public:
      */
     error_collector(const sstring_view& query) : _query(query) {}
 
-    virtual void syntax_error(Recognizer& recognizer, const std::vector<sstring>& token_names) override {
-        // FIXME: stub
-        syntax_error(recognizer, "Parsing failed, detailed description construction not implemented yet");
+    /**
+     * Format and throw a new \c exceptions::syntax_exception.
+     */
+    [[noreturn]] virtual void syntax_error(RecognizerType& recognizer, ANTLR_UINT8** token_names, ExceptionBaseType* ex) override {
+        auto hdr = get_error_header(ex);
+        auto msg = get_error_message(recognizer, ex, token_names);
+        std::stringstream result;
+        result << hdr << ' ' << msg;
 #if 0
-        String hdr = recognizer.getErrorHeader(e);
-        String msg = recognizer.getErrorMessage(e, tokenNames);
-
-        StringBuilder builder = new StringBuilder().append(hdr)
-                .append(' ')
-                .append(msg);
-
         if (recognizer instanceof Parser)
             appendQuerySnippet((Parser) recognizer, builder);
-
-        errorMsgs.add(builder.toString());
 #endif
-    }
 
-    virtual void syntax_error(Recognizer& recognizer, const sstring& msg) override {
-        _error_msgs.emplace_back(msg);
+        throw exceptions::syntax_exception(result.str());
     }
 
     /**
-     * Throws the first syntax error found by the lexer or the parser if it exists.
-     *
-     * @throws SyntaxException the syntax error.
+     * Throw a new \c exceptions::syntax_exception.
      */
-    void throw_first_syntax_error() {
-        if (!_error_msgs.empty()) {
-            throw exceptions::syntax_exception(_error_msgs[0]);
+    [[noreturn]] virtual void syntax_error(RecognizerType&, const sstring& msg) override {
+        throw exceptions::syntax_exception(msg);
+    }
+
+private:
+    std::string get_error_header(ExceptionBaseType* ex) {
+        std::stringstream result;
+        result << "line " << ex->get_line() << ":" << ex->get_charPositionInLine();
+        return result.str();
+    }
+
+    std::string get_error_message(RecognizerType& recognizer, ExceptionBaseType* ex, ANTLR_UINT8** token_names)
+    {
+        using namespace antlr3;
+        std::stringstream msg;
+        switch (ex->getType()) {
+        case ExceptionType::UNWANTED_TOKEN_EXCEPTION: {
+            msg << "extraneous input " << get_token_error_display(recognizer, ex->get_token());
+            if (token_names != nullptr) {
+                std::string token_name;
+                if (recognizer.is_eof_token(ex->get_expecting())) {
+                    token_name = "EOF";
+                } else {
+                    token_name = reinterpret_cast<const char*>(token_names[ex->get_expecting()]);
+                }
+                msg << " expecting " << token_name;
+            }
+            break;
         }
+        case ExceptionType::MISSING_TOKEN_EXCEPTION: {
+            std::string token_name;
+            if (token_names == nullptr) {
+                token_name = "(" + std::to_string(ex->get_expecting()) + ")";
+            } else {
+                if (recognizer.is_eof_token(ex->get_expecting())) {
+                    token_name = "EOF";
+                } else {
+                    token_name = reinterpret_cast<const char*>(token_names[ex->get_expecting()]);
+                }
+            }
+            msg << "missing " << token_name << " at " << get_token_error_display(recognizer, ex->get_token());
+            break;
+        }
+        case ExceptionType::NO_VIABLE_ALT_EXCEPTION: {
+            msg << "no viable alternative at input " << get_token_error_display(recognizer, ex->get_token());
+            break;
+        }
+        default:
+            ex->displayRecognitionError(token_names, msg);
+        }
+        return msg.str();
+    }
+
+    std::string get_token_error_display(RecognizerType& recognizer, const TokenType* token)
+    {
+        return "'" + recognizer.token_text(token) + "'";
     }
 
 #if 0

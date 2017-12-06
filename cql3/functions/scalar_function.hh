@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2014 Cloudius Systems
+ * Copyright (C) 2014 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -58,7 +58,7 @@ public:
      * @return the result of applying this function to the parameter
      * @throws InvalidRequestException if this function cannot not be applied to the parameter
      */
-    virtual bytes_opt execute(serialization_format sf, const std::vector<bytes_opt>& parameters) = 0;
+    virtual bytes_opt execute(cql_serialization_format sf, const std::vector<bytes_opt>& parameters) = 0;
 };
 
 

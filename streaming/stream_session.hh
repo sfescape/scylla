@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -41,17 +41,16 @@
 #include "gms/i_endpoint_state_change_subscriber.hh"
 #include "core/distributed.hh"
 #include "cql3/query_processor.hh"
-#include "message/messaging_service.hh"
+#include "message/messaging_service_fwd.hh"
 #include "utils/UUID.hh"
 #include "streaming/stream_session_state.hh"
 #include "streaming/stream_transfer_task.hh"
 #include "streaming/stream_receive_task.hh"
 #include "streaming/stream_request.hh"
-#include "streaming/messages/incoming_file_message.hh"
-#include "streaming/messages/prepare_message.hh"
+#include "streaming/prepare_message.hh"
 #include "streaming/stream_detail.hh"
+#include "streaming/stream_manager.hh"
 #include "streaming/session_info.hh"
-#include "sstables/sstables.hh"
 #include "query-request.hh"
 #include "dht/i_partitioner.hh"
 #include <map>
@@ -126,34 +125,24 @@ class stream_result_future;
  *       session is done is is closed (closeSession()). Otherwise, the node switch to the WAIT_COMPLETE state and
  *       send a CompleteMessage to the other side.
  */
-class stream_session : public gms::i_endpoint_state_change_subscriber, public enable_shared_from_this<stream_session> {
+class stream_session : public enable_shared_from_this<stream_session> {
 private:
-    using messaging_verb = net::messaging_verb;
-    using messaging_service = net::messaging_service;
-    using shard_id = net::messaging_service::shard_id;
+    using messaging_verb = netw::messaging_verb;
+    using messaging_service = netw::messaging_service;
+    using msg_addr = netw::msg_addr;
     using inet_address = gms::inet_address;
-    using endpoint_state = gms::endpoint_state;
-    using application_state = gms::application_state;
-    using versioned_value = gms::versioned_value;
     using UUID = utils::UUID;
     using token = dht::token;
     using ring_position = dht::ring_position;
-    class handler {
-    public:
-        future<> stop() {
-            return make_ready_future<>();
-        }
-    };
-    static distributed<handler> _handlers;
     static void init_messaging_service_handler();
     static distributed<database>* _db;
 public:
-    static net::messaging_service& ms() {
-        return net::get_local_messaging_service();
+    static netw::messaging_service& ms() {
+        return netw::get_local_messaging_service();
     }
     static database& get_local_db() { return _db->local(); }
+    static distributed<database>& get_db() { return *_db; };
     static future<> init_streaming_service(distributed<database>& db);
-    static future<> test(distributed<cql3::query_processor>& qp);
 public:
     /**
      * Streaming endpoint.
@@ -161,12 +150,8 @@ public:
      * Each {@code StreamSession} is identified by this InetAddress which is broadcast address of the node streaming.
      */
     inet_address peer;
-    /** Actual connecting address. Can be the same as {@linkplain #peer}. */
-    inet_address connecting;
-    unsigned src_cpu_id;
     unsigned dst_cpu_id;
 private:
-    int _index;
     // should not be null when session is started
     shared_ptr<stream_result_future> _stream_result;
 
@@ -180,12 +165,45 @@ private:
     /* can be null when session is created in remote */
     //private final StreamConnectionFactory factory;
 
+    int64_t _bytes_sent = 0;
+    int64_t _bytes_received = 0;
+
     int _retries;
     bool _is_aborted =  false;
-    bool _keep_ss_table_level;
 
     stream_session_state _state = stream_session_state::INITIALIZED;
     bool _complete_sent = false;
+    bool _received_failed_complete_message = false;
+
+    // If the session is idle for 300 minutes, close the session
+    std::chrono::seconds _keep_alive_timeout{60 * 300};
+    // Check every 10 minutes
+    std::chrono::seconds _keep_alive_interval{60 * 10};
+    timer<lowres_clock> _keep_alive;
+    stream_bytes _last_stream_bytes;
+    lowres_clock::time_point _last_stream_progress;
+
+    session_info _session_info;
+public:
+    void start_keep_alive_timer() {
+        _keep_alive.rearm(lowres_clock::now() + _keep_alive_interval);
+    }
+
+    void add_bytes_sent(int64_t bytes) {
+        _bytes_sent += bytes;
+    }
+
+    void add_bytes_received(int64_t bytes) {
+        _bytes_received += bytes;
+    }
+
+    int64_t get_bytes_sent() const {
+        return _bytes_sent;
+    }
+
+    int64_t get_bytes_received() const {
+        return _bytes_received;
+    }
 public:
     stream_session();
     /**
@@ -195,21 +213,14 @@ public:
      * @param connecting Actual connecting address
      * @param factory is used for establishing connection
      */
-    stream_session(inet_address peer_, inet_address connecting_, int index_, bool keep_ss_table_level_);
+    stream_session(inet_address peer_);
     ~stream_session();
 
     UUID plan_id();
 
-    int session_index() {
-        return _index;
-    }
-
     sstring description();
 
 public:
-    bool keep_ss_table_level() {
-        return _keep_ss_table_level;
-    }
     /**
      * Bind this session to report to specific {@link StreamResultFuture} and
      * perform pre-streaming initialization.
@@ -219,13 +230,6 @@ public:
     void init(shared_ptr<stream_result_future> stream_result_);
 
     void start();
-#if 0
-    public Socket createConnection() throws IOException
-    {
-        assert factory != null;
-        return factory.createConnection(connecting);
-    }
-#endif
 
     /**
      * Request data fetch task to this session.
@@ -234,8 +238,8 @@ public:
      * @param ranges Ranges to retrieve data
      * @param columnFamilies ColumnFamily names. Can be empty if requesting all CF under the keyspace.
      */
-    void add_stream_request(sstring keyspace, std::vector<query::range<token>> ranges, std::vector<sstring> column_families, long repaired_at) {
-        _requests.emplace_back(std::move(keyspace), std::move(ranges), std::move(column_families), repaired_at);
+    void add_stream_request(sstring keyspace, dht::token_range_vector ranges, std::vector<sstring> column_families) {
+        _requests.emplace_back(std::move(keyspace), std::move(ranges), std::move(column_families));
     }
 
     /**
@@ -249,13 +253,10 @@ public:
      * @param flushTables flush tables?
      * @param repairedAt the time the repair started.
      */
-    void add_transfer_ranges(sstring keyspace, std::vector<query::range<token>> ranges, std::vector<sstring> column_families, bool flush_tables, long repaired_at);
+    void add_transfer_ranges(sstring keyspace, dht::token_range_vector ranges, std::vector<sstring> column_families);
 
     std::vector<column_family*> get_column_family_stores(const sstring& keyspace, const std::vector<sstring>& column_families);
 
-    void add_transfer_files(std::vector<stream_detail> sstable_details);
-
-private:
     void close_session(stream_session_state final_state);
 
 public:
@@ -284,40 +285,6 @@ public:
         return _state == stream_session_state::COMPLETE;
     }
 
-#if 0
-    public void messageReceived(StreamMessage message)
-    {
-        switch (message.type)
-        {
-            case PREPARE:
-                PrepareMessage msg = (PrepareMessage) message;
-                prepare(msg.requests, msg.summaries);
-                break;
-
-            case FILE:
-                receive((IncomingFileMessage) message);
-                break;
-
-            case RECEIVED:
-                ReceivedMessage received = (ReceivedMessage) message;
-                received(received.cfId, received.sequenceNumber);
-                break;
-
-            case RETRY:
-                RetryMessage retry = (RetryMessage) message;
-                retry(retry.cfId, retry.sequenceNumber);
-                break;
-
-            case COMPLETE:
-                complete();
-                break;
-
-            case SESSION_FAILED:
-                sessionFailed();
-                break;
-        }
-    }
-#endif
     future<> initiate();
 
     /**
@@ -332,38 +299,16 @@ public:
      */
     void on_error();
 
+    void abort();
+
+    void received_failed_complete_message();
+
     /**
      * Prepare this session for sending/receiving files.
      */
-    future<messages::prepare_message> prepare(std::vector<stream_request> requests, std::vector<stream_summary> summaries);
+    future<prepare_message> prepare(std::vector<stream_request> requests, std::vector<stream_summary> summaries);
 
     void follower_start_sent();
-
-    /**
-     * Call back after sending FileMessageHeader.
-     *
-     * @param header sent header
-     */
-    void file_sent(const messages::file_message_header& header);
-
-    /**
-     * Call back after receiving FileMessageHeader.
-     *
-     * @param message received file
-     */
-    void receive(messages::incoming_file_message message);
-
-    void progress(/* Descriptor desc */ progress_info::direction dir, long bytes, long total);
-
-    void received(UUID cf_id, int sequence_number);
-
-    /**
-     * Call back on receiving {@code StreamMessage.Type.RETRY} message.
-     *
-     * @param cfId ColumnFamily ID
-     * @param sequenceNumber Sequence number to indicate which file to stream again
-     */
-    void retry(UUID cf_id, int sequence_number);
 
     /**
      * Check if session is completed on receiving {@code StreamMessage.Type.COMPLETE} message.
@@ -371,59 +316,28 @@ public:
     void complete();
 
     /**
-     * Call back on receiving {@code StreamMessage.Type.SESSION_FAILED} message.
-     */
-    void session_failed();
-
-#if 0
-    public void doRetry(FileMessageHeader header, Throwable e)
-    {
-        logger.warn("[Stream #{}] Retrying for following error", planId(), e);
-        // retry
-        retries++;
-        if (retries > DatabaseDescriptor.getMaxStreamingRetries())
-            onError(new IOException("Too many retries for " + header, e));
-        else
-            handler.sendMessage(new RetryMessage(header.cfId, header.sequenceNumber));
-    }
-#endif
-
-    /**
      * @return Current snapshot of this session info.
      */
-    session_info get_session_info();
+    session_info make_session_info();
+
+    session_info& get_session_info() {
+        return _session_info;
+    }
+
+    const session_info& get_session_info() const {
+        return _session_info;
+    }
+
+    future<> update_progress();
 
     void receive_task_completed(UUID cf_id);
     void transfer_task_completed(UUID cf_id);
-
-public:
-    virtual void on_join(inet_address endpoint, endpoint_state ep_state) override {}
-    virtual void before_change(inet_address endpoint, endpoint_state current_state, application_state new_state_key, versioned_value new_value) override {}
-    virtual void on_change(inet_address endpoint, application_state state, versioned_value value) override {}
-    virtual void on_alive(inet_address endpoint, endpoint_state state) override {}
-    virtual void on_dead(inet_address endpoint, endpoint_state state) override {}
-    virtual void on_remove(inet_address endpoint) override { close_session(stream_session_state::FAILED); }
-    virtual void on_restart(inet_address endpoint, endpoint_state ep_state) override { close_session(stream_session_state::FAILED); }
-
 private:
-    future<> send_complete_message();
+    void send_failed_complete_message();
     bool maybe_completed();
-#if 0
-
-    /**
-     * Flushes matching column families from the given keyspace, or all columnFamilies
-     * if the cf list is empty.
-     */
-    private void flushSSTables(Iterable<ColumnFamilyStore> stores)
-    {
-        List<Future<?>> flushes = new ArrayList<>();
-        for (ColumnFamilyStore cfs : stores)
-            flushes.add(cfs.forceFlush());
-        FBUtilities.waitOnFutures(flushes);
-    }
-#endif
     void prepare_receiving(stream_summary& summary);
     void start_streaming_files();
+    future<> receiving_failed(UUID cf_id);
 };
 
 } // namespace streaming

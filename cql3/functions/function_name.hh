@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2014 Cloudius Systems
+ * Copyright (C) 2014 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -43,7 +43,7 @@
 
 #include "core/sstring.hh"
 #include "db/system_keyspace.hh"
-#include <iostream>
+#include <iosfwd>
 #include <functional>
 
 namespace cql3 {

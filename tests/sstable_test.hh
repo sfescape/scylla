@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -22,11 +22,15 @@
 
 #pragma once
 
+#include "sstables/writer.hh"
 #include "sstables/sstables.hh"
+#include "sstables/binary_search.hh"
 #include "database.hh"
 #include "schema.hh"
 #include "schema_builder.hh"
 #include "core/thread.hh"
+#include "sstables/index_reader.hh"
+#include "tests/test_services.hh"
 
 static auto la = sstables::sstable::version_types::la;
 static auto big = sstables::sstable::format_types::big;
@@ -36,15 +40,26 @@ class column_family_test {
 public:
     column_family_test(lw_shared_ptr<column_family> cf) : _cf(cf) {}
 
-    void add_sstable(sstables::sstable&& sstable) {
-        auto generation = sstable.generation();
-        _cf->_sstables->emplace(generation, make_lw_shared(std::move(sstable)));
+    void add_sstable(sstables::shared_sstable sstable) {
+        _cf->_sstables->insert(std::move(sstable));
+    }
+
+    static void update_sstables_known_generation(column_family& cf, unsigned generation) {
+        cf.update_sstables_known_generation(generation);
+    }
+
+    static uint64_t calculate_generation_for_new_table(column_family& cf) {
+        return cf.calculate_generation_for_new_table();
+    }
+
+    static int64_t calculate_shard_from_sstable_generation(int64_t generation) {
+        return column_family::calculate_shard_from_sstable_generation(generation);
     }
 };
 
 namespace sstables {
 
-using sstable_ptr = lw_shared_ptr<sstable>;
+using sstable_ptr = shared_sstable;
 
 class test {
     sstable_ptr _sst;
@@ -53,26 +68,45 @@ public:
     test(sstable_ptr s) : _sst(s) {}
 
     summary& _summary() {
-        return _sst->_summary;
+        return _sst->_components->summary;
     }
 
     future<temporary_buffer<char>> data_read(uint64_t pos, size_t len) {
-        return _sst->data_read(pos, len);
+        return _sst->data_read(pos, len, default_priority_class());
     }
-    future<index_list> read_indexes(uint64_t summary_idx) {
-        return _sst->read_indexes(summary_idx);
+
+    future<index_list> read_indexes() {
+        auto l = make_lw_shared<index_list>();
+        return do_with(_sst->get_index_reader(default_priority_class()), [l] (auto& ir) {
+            return ir->read_partition_data().then([&, l] {
+                l->push_back(ir->current_partition_entry());
+            }).then([&, l] {
+                return repeat([&, l] {
+                    return ir->advance_to_next_partition().then([&, l] {
+                        if (ir->eof()) {
+                            return stop_iteration::yes;
+                        }
+
+                        l->push_back(ir->current_partition_entry());
+                        return stop_iteration::no;
+                    });
+                });
+            });
+        }).then([l] {
+            return *l;
+        });
     }
 
     future<> read_statistics() {
-        return _sst->read_statistics();
+        return _sst->read_statistics(default_priority_class());
     }
 
     statistics& get_statistics() {
-        return _sst->_statistics;
+        return _sst->_components->statistics;
     }
 
     future<> read_summary() {
-        return _sst->read_summary();
+        return _sst->read_summary(default_priority_class());
     }
 
     future<summary_entry&> read_summary_entry(size_t i) {
@@ -80,7 +114,7 @@ public:
     }
 
     summary& get_summary() {
-        return _sst->_summary;
+        return _sst->_components->summary;
     }
 
     future<> read_toc() {
@@ -88,43 +122,81 @@ public:
     }
 
     auto& get_components() {
-        return _sst->_components;
+        return _sst->_recognized_components;
     }
 
     template <typename T>
     int binary_search(const T& entries, const key& sk) {
-        return _sst->binary_search(entries, sk);
+        return sstables::binary_search(entries, sk);
+    }
+
+    void change_generation_number(int64_t generation) {
+        _sst->_generation = generation;
+    }
+
+    void change_dir(sstring dir) {
+        _sst->_dir = dir;
+    }
+
+    void set_data_file_size(uint64_t size) {
+        _sst->_data_file_size = size;
+    }
+
+    void set_data_file_write_time(db_clock::time_point wtime) {
+        _sst->_data_file_write_time = wtime;
     }
 
     future<> store() {
-        _sst->_components.erase(sstable::component_type::Index);
-        _sst->_components.erase(sstable::component_type::Data);
+        _sst->_recognized_components.erase(sstable::component_type::Index);
+        _sst->_recognized_components.erase(sstable::component_type::Data);
         return seastar::async([sst = _sst] {
-            sst->write_toc();
-            sst->write_statistics();
-            sst->write_compression();
-            sst->write_filter();
-            sst->write_summary();
-            sst->seal_sstable();
+            sst->write_toc(default_priority_class());
+            sst->write_statistics(default_priority_class());
+            sst->write_compression(default_priority_class());
+            sst->write_filter(default_priority_class());
+            sst->write_summary(default_priority_class());
+            sst->seal_sstable().get();
         });
     }
 
-    static sstable_ptr make_test_sstable(size_t buffer_size, sstring ks, sstring cf, sstring dir, unsigned long generation, sstable::version_types v, sstable::format_types f, gc_clock::time_point now = gc_clock::now()) {
-        auto sst = sstable(buffer_size, ks, cf, dir, generation, v, f, now);
-        return make_lw_shared<sstable>(std::move(sst));
+    static sstable_ptr make_test_sstable(size_t buffer_size, schema_ptr schema, sstring dir, unsigned long generation, sstable::version_types v,
+            sstable::format_types f, gc_clock::time_point now = gc_clock::now()) {
+        return sstables::make_sstable(std::move(schema), dir, generation, v, f, now, default_io_error_handler_gen(), buffer_size);
+    }
+
+    // Used to create synthetic sstables for testing leveled compaction strategy.
+    void set_values_for_leveled_strategy(uint64_t fake_data_size, uint32_t sstable_level, int64_t max_timestamp, sstring first_key, sstring last_key) {
+        _sst->_data_file_size = fake_data_size;
+        // Create a synthetic stats metadata
+        stats_metadata stats = {};
+        // leveled strategy sorts sstables by age using max_timestamp, let's set it to 0.
+        stats.max_timestamp = max_timestamp;
+        stats.sstable_level = sstable_level;
+        _sst->_components->statistics.contents[metadata_type::Stats] = std::make_unique<stats_metadata>(std::move(stats));
+        _sst->_components->summary.first_key.value = bytes(reinterpret_cast<const signed char*>(first_key.c_str()), first_key.size());
+        _sst->_components->summary.last_key.value = bytes(reinterpret_cast<const signed char*>(last_key.c_str()), last_key.size());
+        _sst->set_first_and_last_keys();
+    }
+
+    void set_values(sstring first_key, sstring last_key, stats_metadata stats) {
+        _sst->_components->statistics.contents[metadata_type::Stats] = std::make_unique<stats_metadata>(std::move(stats));
+        _sst->_components->summary.first_key.value = bytes(reinterpret_cast<const signed char*>(first_key.c_str()), first_key.size());
+        _sst->_components->summary.last_key.value = bytes(reinterpret_cast<const signed char*>(last_key.c_str()), last_key.size());
+        _sst->set_first_and_last_keys();
+        _sst->_components->statistics.contents[metadata_type::Compaction] = std::make_unique<compaction_metadata>();
     }
 };
 
-inline future<sstable_ptr> reusable_sst(sstring dir, unsigned long generation) {
-    auto sst = make_lw_shared<sstable>("ks", "cf", dir, generation, la, big);
+inline future<sstable_ptr> reusable_sst(schema_ptr schema, sstring dir, unsigned long generation) {
+    auto sst = sstables::make_sstable(std::move(schema), dir, generation, la, big);
     auto fut = sst->load();
     return std::move(fut).then([sst = std::move(sst)] {
         return make_ready_future<sstable_ptr>(std::move(sst));
     });
 }
 
-inline future<> working_sst(sstring dir, unsigned long generation) {
-    return reusable_sst(dir, generation).then([] (auto ptr) { return make_ready_future<>(); });
+inline future<> working_sst(schema_ptr schema, sstring dir, unsigned long generation) {
+    return reusable_sst(std::move(schema), dir, generation).then([] (auto ptr) { return make_ready_future<>(); });
 }
 
 inline schema_ptr composite_schema() {
@@ -220,8 +292,8 @@ inline schema_ptr list_schema() {
     return s;
 }
 
-inline schema_ptr uncompressed_schema() {
-    static thread_local auto uncompressed = [] {
+inline schema_ptr uncompressed_schema(int32_t min_index_interval = 0) {
+    auto uncompressed = [=] {
         schema_builder builder(make_lw_shared(schema(generate_legacy_id("ks", "uncompressed"), "ks", "uncompressed",
         // partition key
         {{"name", utf8_type}},
@@ -236,6 +308,10 @@ inline schema_ptr uncompressed_schema() {
         // comment
         "Uncompressed data"
        )));
+       builder.set_compressor_params(compression_parameters({ }));
+       if (min_index_interval) {
+           builder.set_min_index_interval(min_index_interval);
+       }
        return builder.build(schema_builder::compact_storage::no);
     }();
     return uncompressed;
@@ -419,7 +495,7 @@ inline bool check_status_and_done(const atomic_cell &c, status expected) {
 }
 
 template <status Status>
-inline void match(const row& row, const schema& s, bytes col, const boost::any& value, int64_t timestamp = 0, int32_t expiration = 0) {
+inline void match(const row& row, const schema& s, bytes col, const data_value& value, int64_t timestamp = 0, int32_t expiration = 0) {
     auto cdef = s.get_column_definition(col);
 
     BOOST_CHECK_NO_THROW(row.cell_at(cdef->id));
@@ -438,21 +514,21 @@ inline void match(const row& row, const schema& s, bytes col, const boost::any& 
     }
 }
 
-inline void match_live_cell(const row& row, const schema& s, bytes col, const boost::any& value) {
+inline void match_live_cell(const row& row, const schema& s, bytes col, const data_value& value) {
     match<status::live>(row, s, col, value);
 }
 
-inline void match_expiring_cell(const row& row, const schema& s, bytes col, const boost::any& value, int64_t timestamp, int32_t expiration) {
+inline void match_expiring_cell(const row& row, const schema& s, bytes col, const data_value& value, int64_t timestamp, int32_t expiration) {
     match<status::ttl>(row, s, col, value);
 }
 
 inline void match_dead_cell(const row& row, const schema& s, bytes col) {
-    match<status::dead>(row, s, col, boost::any({}));
+    match<status::dead>(row, s, col, 0); // value will be ignored
 }
 
 inline void match_absent(const row& row, const schema& s, bytes col) {
     auto cdef = s.get_column_definition(col);
-    BOOST_REQUIRE_THROW(row.cell_at(cdef->id), std::out_of_range);
+    BOOST_REQUIRE(row.find_cell(cdef->id) == nullptr);
 }
 
 inline collection_type_impl::mutation
@@ -546,30 +622,25 @@ public:
     }
 
     static future<> do_with_test_directory(std::function<future<> ()>&& fut, sstring p = path()) {
-        return test_setup::create_empty_test_dir(p).then([fut = std::move(fut), p] () mutable {
-            return fut();
-        }).finally([p] {
-            return test_setup::empty_test_dir(p).then([p] {
-                return engine().remove_file(p);
-            });
+        return seastar::async([p, fut = std::move(fut)] {
+            storage_service_for_tests ssft;
+            test_setup::create_empty_test_dir(p).get();
+            fut().get();
+            test_setup::empty_test_dir(p).get();
+            engine().remove_file(p).get();
         });
     }
 };
 }
 
-
-struct test_mutation_reader final : public ::mutation_reader::impl {
-    sstables::shared_sstable _sst;
-    sstables::mutation_reader _rd;
-public:
-    test_mutation_reader(sstables::shared_sstable sst, sstables::mutation_reader rd)
-            : _sst(std::move(sst)), _rd(std::move(rd)) {}
-    virtual future<mutation_opt> operator()() override {
-        return _rd.read();
-    }
-};
-
 inline
-::mutation_reader as_mutation_reader(sstables::shared_sstable sst, sstables::mutation_reader rd) {
-    return make_mutation_reader<test_mutation_reader>(std::move(sst), std::move(rd));
+::mutation_source as_mutation_source(sstables::shared_sstable sst) {
+    return sst->as_mutation_source();
+}
+
+
+inline dht::decorated_key make_dkey(schema_ptr s, bytes b)
+{
+    auto sst_key = sstables::key::from_bytes(b);
+    return dht::global_partitioner().decorate_key(*s, sst_key.to_partition_key(*s));
 }

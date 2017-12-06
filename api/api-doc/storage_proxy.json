@@ -193,8 +193,8 @@
          "operations":[
             {
                "method":"GET",
-               "summary":"Get the RPC timeout",
-               "type":"long",
+               "summary":"Get the RPC timeout in seconds",
+               "type":"double",
                "nickname":"get_rpc_timeout",
                "produces":[
                   "application/json"
@@ -214,10 +214,10 @@
                "parameters":[
                   {
                      "name":"timeout",
-                     "description":"Timeout in millis",
+                     "description":"Timeout in seconds",
                      "required":true,
                      "allowMultiple":false,
-                     "type":"long",
+                     "type":"double",
                      "paramType":"query"
                   }
                ]
@@ -229,8 +229,8 @@
          "operations":[
             {
                "method":"GET",
-               "summary":"Get the read RPC timeout",
-               "type":"long",
+               "summary":"Get the read RPC timeout in seconds",
+               "type":"double",
                "nickname":"get_read_rpc_timeout",
                "produces":[
                   "application/json"
@@ -250,10 +250,10 @@
                "parameters":[
                   {
                      "name":"timeout",
-                     "description":"timeout_in_millis",
+                     "description":"The timeout in second",
                      "required":true,
                      "allowMultiple":false,
-                     "type":"long",
+                     "type":"double",
                      "paramType":"query"
                   }
                ]
@@ -265,8 +265,8 @@
          "operations":[
             {
                "method":"GET",
-               "summary":"Get the write RPC timeout",
-               "type":"long",
+               "summary":"Get the write RPC timeout in seconds",
+               "type":"double",
                "nickname":"get_write_rpc_timeout",
                "produces":[
                   "application/json"
@@ -286,10 +286,10 @@
                "parameters":[
                   {
                      "name":"timeout",
-                     "description":"timeout in millisecond",
+                     "description":"timeout in seconds",
                      "required":true,
                      "allowMultiple":false,
-                     "type":"long",
+                     "type":"double",
                      "paramType":"query"
                   }
                ]
@@ -301,8 +301,8 @@
          "operations":[
             {
                "method":"GET",
-               "summary":"Get counter write rpc timeout",
-               "type":"long",
+               "summary":"Get counter write rpc timeout in seconds",
+               "type":"double",
                "nickname":"get_counter_write_rpc_timeout",
                "produces":[
                   "application/json"
@@ -322,10 +322,10 @@
                "parameters":[
                   {
                      "name":"timeout",
-                     "description":"timeout in millisecond",
+                     "description":"timeout in seconds",
                      "required":true,
                      "allowMultiple":false,
-                     "type":"long",
+                     "type":"double",
                      "paramType":"query"
                   }
                ]
@@ -337,8 +337,8 @@
          "operations":[
             {
                "method":"GET",
-               "summary":"Get CAS contention timeout",
-               "type":"long",
+               "summary":"Get CAS contention timeout in seconds",
+               "type":"double",
                "nickname":"get_cas_contention_timeout",
                "produces":[
                   "application/json"
@@ -358,10 +358,10 @@
                "parameters":[
                   {
                      "name":"timeout",
-                     "description":"timeout in millisecond",
+                     "description":"timeout in second",
                      "required":true,
                      "allowMultiple":false,
-                     "type":"long",
+                     "type":"double",
                      "paramType":"query"
                   }
                ]
@@ -373,8 +373,8 @@
          "operations":[
             {
                "method":"GET",
-               "summary":"Get range rpc timeout",
-               "type":"long",
+               "summary":"Get range rpc timeout in seconds",
+               "type":"double",
                "nickname":"get_range_rpc_timeout",
                "produces":[
                   "application/json"
@@ -394,10 +394,10 @@
                "parameters":[
                   {
                      "name":"timeout",
-                     "description":"timeout in millisecond",
+                     "description":"timeout in second",
                      "required":true,
                      "allowMultiple":false,
-                     "type":"long",
+                     "type":"double",
                      "paramType":"query"
                   }
                ]
@@ -409,8 +409,8 @@
          "operations":[
             {
                "method":"GET",
-               "summary":"Get truncate rpc timeout",
-               "type":"long",
+               "summary":"Get truncate rpc timeout in seconds",
+               "type":"double",
                "nickname":"get_truncate_rpc_timeout",
                "produces":[
                   "application/json"
@@ -430,10 +430,10 @@
                "parameters":[
                   {
                      "name":"timeout",
-                     "description":"timeout in millisecond",
+                     "description":"timeout in second",
                      "required":true,
                      "allowMultiple":false,
-                     "type":"long",
+                     "type":"double",
                      "paramType":"query"
                   }
                ]
@@ -546,7 +546,58 @@
          ]
       },
       {
-      "path": "/storage_service/metrics/cas_write/unfinished_commit",
+         "path":"/storage_proxy/metrics/cas_read/unavailables",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get CAS read unavailables",
+               "type":"long",
+               "nickname":"get_cas_read_unavailables",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/storage_proxy/metrics/cas_write/timeouts",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get CAS write timeout",
+               "type":"long",
+               "nickname":"get_cas_write_timeouts",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/storage_proxy/metrics/cas_write/unavailables",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get CAS write unavailables",
+               "type":"long",
+               "nickname":"get_cas_write_unavailables",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+
+               ]
+            }
+         ]
+      },
+      {
+      "path": "/storage_proxy/metrics/cas_write/unfinished_commit",
       "operations": [
         {
           "method": "GET",
@@ -561,7 +612,7 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/cas_write/contention",
+      "path": "/storage_proxy/metrics/cas_write/contention",
       "operations": [
         {
           "method": "GET",
@@ -576,7 +627,7 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/cas_write/condition_not_met",
+      "path": "/storage_proxy/metrics/cas_write/condition_not_met",
       "operations": [
         {
           "method": "GET",
@@ -591,7 +642,7 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/cas_read/unfinished_commit",
+      "path": "/storage_proxy/metrics/cas_read/unfinished_commit",
       "operations": [
         {
           "method": "GET",
@@ -606,7 +657,7 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/cas_read/contention",
+      "path": "/storage_proxy/metrics/cas_read/contention",
       "operations": [
         {
           "method": "GET",
@@ -621,7 +672,7 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/cas_read/condition_not_met",
+      "path": "/storage_proxy/metrics/cas_read/condition_not_met",
       "operations": [
         {
           "method": "GET",
@@ -636,7 +687,7 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/read/timeouts",
+      "path": "/storage_proxy/metrics/read/timeouts",
       "operations": [
         {
           "method": "GET",
@@ -651,7 +702,7 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/read/unavailables",
+      "path": "/storage_proxy/metrics/read/unavailables",
       "operations": [
         {
           "method": "GET",
@@ -666,12 +717,72 @@
       ]
     },
     {
-      "path": "/storage_proxy/metrics/read/latency/histogram",
+      "path": "/storage_proxy/metrics/read/timeouts_rates",
+      "operations": [
+        {
+          "method": "GET",
+          "summary": "Get read metrics rates",
+          "type": "#/utils/rate_moving_average",
+          "nickname": "get_read_metrics_timeouts_rates",
+          "produces": [
+            "application/json"
+          ],
+          "parameters": []
+        }
+      ]
+    },
+    {
+      "path": "/storage_proxy/metrics/read/unavailables_rates",
+      "operations": [
+        {
+          "method": "GET",
+          "summary": "Get read metrics rates",
+          "type": "#/utils/rate_moving_average",
+          "nickname": "get_read_metrics_unavailables_rates",
+          "produces": [
+            "application/json"
+          ],
+          "parameters": []
+        }
+      ]
+    },
+    {
+      "path": "/storage_proxy/metrics/read/histogram",
       "operations": [
         {
           "method": "GET",
           "summary": "Get read metrics",
           "$ref": "#/utils/histogram",
+          "nickname": "get_read_metrics_latency_histogram_depricated",
+          "produces": [
+            "application/json"
+          ],
+          "parameters": []
+        }
+      ]
+    },
+    {
+      "path": "/storage_proxy/metrics/range/histogram",
+      "operations": [
+        {
+          "method": "GET",
+          "summary": "Get range metrics",
+          "$ref": "#/utils/histogram",
+          "nickname": "get_range_metrics_latency_histogram_depricated",
+          "produces": [
+            "application/json"
+          ],
+          "parameters": []
+        }
+      ]
+    },
+    {
+      "path": "/storage_proxy/metrics/read/moving_average_histogram",
+      "operations": [
+        {
+          "method": "GET",
+          "summary": "Get read metrics",
+          "$ref": "#/utils/rate_moving_average_and_histogram",
           "nickname": "get_read_metrics_latency_histogram",
           "produces": [
             "application/json"
@@ -681,12 +792,12 @@
       ]
     },
     {
-      "path": "/storage_proxy/metrics/range/latency/histogram",
+      "path": "/storage_proxy/metrics/range/moving_average_histogram",
       "operations": [
         {
           "method": "GET",
-          "summary": "Get range metrics",
-          "$ref": "#/utils/histogram",
+          "summary": "Get range metrics rate and histogram",
+          "$ref": "#/utils/rate_moving_average_and_histogram",
           "nickname": "get_range_metrics_latency_histogram",
           "produces": [
             "application/json"
@@ -696,7 +807,7 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/range/timeouts",
+      "path": "/storage_proxy/metrics/range/timeouts",
       "operations": [
         {
           "method": "GET",
@@ -711,7 +822,7 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/range/unavailables",
+      "path": "/storage_proxy/metrics/range/unavailables",
       "operations": [
         {
           "method": "GET",
@@ -726,7 +837,37 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/write/timeouts",
+      "path": "/storage_proxy/metrics/range/timeouts_rates",
+      "operations": [
+        {
+          "method": "GET",
+          "summary": "Get range metrics rates",
+          "type": "#/utils/rate_moving_average",
+          "nickname": "get_range_metrics_timeouts_rates",
+          "produces": [
+            "application/json"
+          ],
+          "parameters": []
+        }
+      ]
+    },
+    {
+      "path": "/storage_proxy/metrics/range/unavailables_rates",
+      "operations": [
+        {
+          "method": "GET",
+          "summary": "Get range metrics rates",
+          "type": "#/utils/rate_moving_average",
+          "nickname": "get_range_metrics_unavailables_rates",
+          "produces": [
+            "application/json"
+          ],
+          "parameters": []
+        }
+      ]
+    },
+    {
+      "path": "/storage_proxy/metrics/write/timeouts",
       "operations": [
         {
           "method": "GET",
@@ -741,7 +882,7 @@
       ]
     },
     {
-      "path": "/storage_service/metrics/write/unavailables",
+      "path": "/storage_proxy/metrics/write/unavailables",
       "operations": [
         {
           "method": "GET",
@@ -756,12 +897,57 @@
       ]
     },
     {
-      "path": "/storage_proxy/metrics/write/latency/histogram",
+      "path": "/storage_proxy/metrics/write/timeouts_rates",
+      "operations": [
+        {
+          "method": "GET",
+          "summary": "Get write metrics rates",
+          "type": "#/utils/rate_moving_average",
+          "nickname": "get_write_metrics_timeouts_rates",
+          "produces": [
+            "application/json"
+          ],
+          "parameters": []
+        }
+      ]
+    },
+    {
+      "path": "/storage_proxy/metrics/write/unavailables_rates",
+      "operations": [
+        {
+          "method": "GET",
+          "summary": "Get write metrics rates",
+          "type": "#/utils/rate_moving_average",
+          "nickname": "get_write_metrics_unavailables_rates",
+          "produces": [
+            "application/json"
+          ],
+          "parameters": []
+        }
+      ]
+    },
+    {
+      "path": "/storage_proxy/metrics/write/histogram",
       "operations": [
         {
           "method": "GET",
           "summary": "Get write metrics",
           "$ref": "#/utils/histogram",
+          "nickname": "get_write_metrics_latency_histogram_depricated",
+          "produces": [
+            "application/json"
+          ],
+          "parameters": []
+        }
+      ]
+    },
+    {
+      "path": "/storage_proxy/metrics/write/moving_average_histogram",
+      "operations": [
+        {
+          "method": "GET",
+          "summary": "Get write metrics",
+          "$ref": "#/utils/rate_moving_average_and_histogram",
           "nickname": "get_write_metrics_latency_histogram",
           "produces": [
             "application/json"
@@ -769,7 +955,103 @@
           "parameters": []
         }
       ]
-    }
+    },
+    {
+         "path":"/storage_proxy/metrics/read/estimated_histogram/",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get read estimated latency",
+               "$ref":"#/utils/estimated_histogram",
+               "nickname":"get_read_estimated_histogram",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/storage_proxy/metrics/read",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get read latency",
+               "type":"int",
+               "nickname":"get_read_latency",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/storage_proxy/metrics/write/estimated_histogram/",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get write estimated latency",
+               "$ref":"#/utils/estimated_histogram",
+               "nickname":"get_write_estimated_histogram",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/storage_proxy/metrics/write",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get write latency",
+               "type":"int",
+               "nickname":"get_write_latency",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/storage_proxy/metrics/range/estimated_histogram/",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get range estimated latency",
+               "$ref":"#/utils/estimated_histogram",
+               "nickname":"get_range_estimated_histogram",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/storage_proxy/metrics/range",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get range latency",
+               "type":"int",
+               "nickname":"get_range_latency",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      }
    ],
    "models":{
       "mapper_list":{

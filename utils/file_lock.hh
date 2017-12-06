@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Cloudius Systems
+ * Copyright (C) 2014 ScyllaDB
  */
 
 /*
@@ -26,12 +26,14 @@
 #include <core/sstring.hh>
 #include <core/future.hh>
 
+#include "seastarx.hh"
+
 namespace utils {
     class file_lock {
     public:
         file_lock() = delete;
         file_lock(const file_lock&) = delete;
-        file_lock(file_lock&&);
+        file_lock(file_lock&&) noexcept;
         ~file_lock();
 
         file_lock& operator=(file_lock&&) = default;

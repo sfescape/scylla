@@ -18,8 +18,8 @@
  */
 
 /*
- * Modified by Cloudius Systems
- * Copyright 2015 Cloudius Systems
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -57,7 +57,7 @@ class commitlog;
 
 class commitlog_replayer {
 public:
-    commitlog_replayer(commitlog_replayer&&);
+    commitlog_replayer(commitlog_replayer&&) noexcept;
     ~commitlog_replayer();
 
     static future<commitlog_replayer> create_replayer(seastar::sharded<cql3::query_processor>&);

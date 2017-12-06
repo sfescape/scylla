@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -62,14 +62,15 @@ class type_parser {
 
     public static final TypeParser EMPTY_PARSER = new TypeParser("", 0);
 #endif
-    type_parser(const sstring& str, size_t idx);
+    type_parser(sstring_view str, size_t idx);
 public:
-    explicit type_parser(const sstring& str);
+    explicit type_parser(sstring_view str);
 
     /**
      * Parse a string containing an type definition.
      */
     static data_type parse(const sstring& str);
+    static data_type parse(sstring_view str);
 
 #if 0
     public static AbstractType<?> parse(CharSequence compareWith) throws SyntaxException, ConfigurationException
@@ -127,6 +128,7 @@ public:
     }
 #endif
     std::vector<data_type> get_type_parameters(bool multicell=true);
+    std::tuple<sstring, bytes, std::vector<bytes>, std::vector<data_type>> get_user_type_parameters();
     data_type do_parse(bool multicell = true);
 
 #if 0

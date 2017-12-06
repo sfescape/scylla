@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -45,6 +45,7 @@
 #include "exceptions/exceptions.hh"
 #include "database_fwd.hh"
 #include "term.hh"
+#include "update_parameters.hh"
 
 #include <experimental/optional>
 
@@ -86,8 +87,24 @@ public:
 
     virtual ~operation() {}
 
+    atomic_cell make_dead_cell(const update_parameters& params) const {
+        return params.make_dead_cell();
+    }
+
+    atomic_cell make_cell(bytes_view value, const update_parameters& params) const {
+        return params.make_cell(value);
+    }
+
+    atomic_cell make_counter_update_cell(int64_t delta, const update_parameters& params) const {
+        return params.make_counter_update_cell(delta);
+    }
+
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const {
         return _t && _t->uses_function(ks_name, function_name);
+    }
+
+    virtual bool is_raw_counter_shard_write() const {
+        return false;
     }
 
     /**
@@ -113,7 +130,7 @@ public:
     /**
      * Execute the operation.
      */
-    virtual void execute(mutation& m, const exploded_clustering_prefix& prefix, const update_parameters& params) = 0;
+    virtual void execute(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params) = 0;
 
     /**
      * A parsed raw UPDATE operation.
@@ -180,28 +197,28 @@ public:
     };
 
     class set_value;
+    class set_counter_value_from_tuple_list;
 
     class set_element : public raw_update {
         const shared_ptr<term::raw> _selector;
         const shared_ptr<term::raw> _value;
+        const bool _by_uuid;
+    private:
+        sstring to_string(const column_definition& receiver) const;
     public:
-        set_element(shared_ptr<term::raw> selector, shared_ptr<term::raw> value)
-            : _selector(std::move(selector)), _value(std::move(value)) {
+        set_element(shared_ptr<term::raw> selector, shared_ptr<term::raw> value, bool by_uuid = false)
+            : _selector(std::move(selector)), _value(std::move(value)), _by_uuid(by_uuid) {
         }
 
         virtual shared_ptr<operation> prepare(database& db, const sstring& keyspace, const column_definition& receiver);
-#if 0
-        protected String toString(ColumnSpecification column)
-        {
-            return String.format("%s[%s] = %s", column.name, selector, value);
-        }
 
-#endif
         virtual bool is_compatible_with(shared_ptr<raw_update> other) override;
     };
 
     class addition : public raw_update {
         const shared_ptr<term::raw> _value;
+    private:
+        sstring to_string(const column_definition& receiver) const;
     public:
         addition(shared_ptr<term::raw> value)
                 : _value(value) {
@@ -209,18 +226,13 @@ public:
 
         virtual shared_ptr<operation> prepare(database& db, const sstring& keyspace, const column_definition& receiver) override;
 
-#if 0
-        protected String toString(ColumnSpecification column)
-        {
-            return String.format("%s = %s + %s", column.name, column.name, value);
-        }
-#endif
-
         virtual bool is_compatible_with(shared_ptr<raw_update> other) override;
     };
 
     class subtraction : public raw_update {
         const shared_ptr<term::raw> _value;
+    private:
+        sstring to_string(const column_definition& receiver) const;
     public:
         subtraction(shared_ptr<term::raw> value)
                 : _value(value) {
@@ -228,18 +240,13 @@ public:
 
         virtual shared_ptr<operation> prepare(database& db, const sstring& keyspace, const column_definition& receiver) override;
 
-#if 0
-        protected String toString(ColumnSpecification column)
-        {
-            return String.format("%s = %s - %s", column.name, column.name, value);
-        }
-#endif
-
         virtual bool is_compatible_with(shared_ptr<raw_update> other) override;
     };
 
     class prepend : public raw_update {
         shared_ptr<term::raw> _value;
+    private:
+        sstring to_string(const column_definition& receiver) const;
     public:
         prepend(shared_ptr<term::raw> value)
                 : _value(std::move(value)) {
@@ -247,12 +254,6 @@ public:
 
         virtual shared_ptr<operation> prepare(database& db, const sstring& keyspace, const column_definition& receiver) override;
 
-#if 0
-        protected String toString(ColumnSpecification column)
-        {
-            return String.format("%s = %s - %s", column.name, value, column.name);
-        }
-#endif
         virtual bool is_compatible_with(shared_ptr<raw_update> other) override;
     };
 

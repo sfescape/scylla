@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -32,24 +32,24 @@ enum class compressor {
 
 class compression_parameters {
 public:
-    static constexpr int32_t DEFAULT_CHUNK_LENGTH = 64 * 1024;
+    static constexpr int32_t DEFAULT_CHUNK_LENGTH = 4 * 1024;
     static constexpr double DEFAULT_CRC_CHECK_CHANCE = 1.0;
 
     static constexpr auto SSTABLE_COMPRESSION = "sstable_compression";
     static constexpr auto CHUNK_LENGTH_KB = "chunk_length_kb";
     static constexpr auto CRC_CHECK_CHANCE = "crc_check_chance";
 private:
-    compressor _compressor = compressor::none;
+    compressor _compressor;
     std::experimental::optional<int> _chunk_length;
     std::experimental::optional<double> _crc_check_chance;
 public:
-    compression_parameters() = default;
-    compression_parameters(compressor c) : _compressor(c) { }
+    compression_parameters(compressor c = compressor::lz4) : _compressor(c) { }
     compression_parameters(const std::map<sstring, sstring>& options) {
         validate_options(options);
 
         auto it = options.find(SSTABLE_COMPRESSION);
         if (it == options.end() || it->second.empty()) {
+            _compressor = compressor::none;
             return;
         }
         const auto& compressor_class = it->second;
@@ -113,6 +113,14 @@ public:
             opts.emplace(sstring(CRC_CHECK_CHANCE), std::to_string(_crc_check_chance.value()));
         }
         return opts;
+    }
+    bool operator==(const compression_parameters& other) const {
+        return _compressor == other._compressor
+               && _chunk_length == other._chunk_length
+               && _crc_check_chance == other._crc_check_chance;
+    }
+    bool operator!=(const compression_parameters& other) const {
+        return !(*this == other);
     }
 private:
     void validate_options(const std::map<sstring, sstring>& options) {

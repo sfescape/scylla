@@ -17,8 +17,8 @@
  */
 
 /*
- * Modified by Cloudius Systems
- * Copyright 2015 Cloudius Systems
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -41,6 +41,8 @@
 #pragma once
 
 #include <stdint.h>
+#include "utils/UUID.hh"
+
 
 namespace db {
 
@@ -71,6 +73,9 @@ struct replay_position {
     bool operator<(const replay_position & r) const {
         return id < r.id ? true : (r.id < id ? false : pos < r.pos);
     }
+    bool operator<=(const replay_position & r) const {
+        return !(r < *this);
+    }
     bool operator==(const replay_position & r) const {
         return id == r.id && pos == r.pos;
     }
@@ -91,6 +96,40 @@ struct replay_position {
     template <typename Describer>
     auto describe_type(Describer f) { return f(id, pos); }
 };
+
+class commitlog;
+class cf_holder;
+
+using cf_id_type = utils::UUID;
+
+class rp_handle {
+public:
+    rp_handle() noexcept;
+    rp_handle(rp_handle&&) noexcept;
+    rp_handle& operator=(rp_handle&&) noexcept;
+    ~rp_handle();
+
+    replay_position release();
+
+    operator bool() const {
+        return _h && _rp != replay_position();
+    }
+    operator const replay_position&() const {
+        return _rp;
+    }
+    const replay_position& rp() const {
+        return _rp;
+    }
+private:
+    friend class commitlog;
+
+    rp_handle(shared_ptr<cf_holder>, cf_id_type, replay_position) noexcept;
+
+    ::shared_ptr<cf_holder> _h;
+    cf_id_type _cf;
+    replay_position _rp;
+};
+
 
 std::ostream& operator<<(std::ostream& out, const replay_position& s);
 

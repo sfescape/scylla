@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -65,79 +65,80 @@ int main(int argc, char** argv) {
                 .with_column("v", bytes_type, column_kind::regular_column)
                 .build();
 
-            auto mt = make_lw_shared<memtable>(s);
-
             cache_tracker tracker;
-            row_cache cache(s, mt->as_data_source(), tracker);
+            row_cache cache(s, make_empty_snapshot_source(), tracker);
 
+            auto mt = make_lw_shared<memtable>(s);
             std::vector<dht::decorated_key> keys;
 
             size_t cell_size = 1024;
             size_t row_count = 40 * 1024; // 40M mutations
+            size_t large_cell_size = cell_size * row_count;
 
             auto make_small_mutation = [&] {
                 mutation m(new_key(s), s);
-                m.set_clustered_cell(new_ckey(s), "v", bytes(bytes::initialized_later(), cell_size), 1);
+                m.set_clustered_cell(new_ckey(s), "v", data_value(bytes(bytes::initialized_later(), cell_size)), 1);
                 return m;
             };
 
             auto make_large_mutation = [&] {
                 mutation m(new_key(s), s);
-                for (size_t j = 0; j < row_count; j++) {
-                    m.set_clustered_cell(new_ckey(s), "v", bytes(bytes::initialized_later(), cell_size), 2);
-                }
+                m.set_clustered_cell(new_ckey(s), "v", data_value(bytes(bytes::initialized_later(), large_cell_size)), 2);
                 return m;
             };
+
+            std::random_device random;
+            std::default_random_engine random_engine(random());
 
             for (int i = 0; i < 10; i++) {
                 auto key = dht::global_partitioner().decorate_key(*s, new_key(s));
 
                 mutation m1(key, s);
-                m1.set_clustered_cell(new_ckey(s), "v", bytes(bytes::initialized_later(), cell_size), 1);
+                m1.set_clustered_cell(new_ckey(s), "v", data_value(bytes(bytes::initialized_later(), cell_size)), 1);
                 cache.populate(m1);
 
                 // Putting large mutations into the memtable. Should take about row_count*cell_size each.
                 mutation m2(key, s);
                 for (size_t j = 0; j < row_count; j++) {
-                    m2.set_clustered_cell(new_ckey(s), "v", bytes(bytes::initialized_later(), cell_size), 2);
+                    m2.set_clustered_cell(new_ckey(s), "v", data_value(bytes(bytes::initialized_later(), cell_size)), 2);
                 }
 
                 mt->apply(m2);
                 keys.push_back(key);
             }
 
+            auto reclaimable_memory = [] {
+                return memory::stats().free_memory() + logalloc::shard_tracker().occupancy().free_space();
+            };
+
             std::cout << "memtable occupancy: " << mt->occupancy() << "\n";
             std::cout << "Cache occupancy: " << tracker.region().occupancy() << "\n";
-            std::cout << "Free memory: " << memory::stats().free_memory() << "\n";
+            std::cout << "Reclaimable memory: " << reclaimable_memory() << "\n";
 
             // We need to have enough Free memory to copy memtable into cache
             // When this assertion fails, increase amount of memory
-            assert(mt->occupancy().used_space() < memory::stats().free_memory());
-
-            auto checker = [](const partition_key& key) {
-                return partition_presence_checker_result::maybe_exists;
-            };
+            assert(mt->occupancy().used_space() < reclaimable_memory());
 
             std::deque<dht::decorated_key> cache_stuffing;
             auto fill_cache_to_the_top = [&] {
                 std::cout << "Filling up memory with evictable data\n";
                 while (true) {
+                    auto evictions_before = tracker.get_stats().partition_evictions;
                     // Ensure that entries matching memtable partitions are evicted
                     // last, we want to hit the merge path in row_cache::update()
                     for (auto&& key : keys) {
                         cache.touch(key);
                     }
-                    auto occupancy_before = tracker.region().occupancy().used_space();
                     auto m = make_small_mutation();
                     cache_stuffing.push_back(m.decorated_key());
                     cache.populate(m);
-                    if (tracker.region().occupancy().used_space() <= occupancy_before) {
+                    if (tracker.get_stats().partition_evictions > evictions_before) {
                         break;
                     }
                 }
                 std::cout << "Shuffling..\n";
                 // Evict in random order to create fragmentation.
-                std::random_shuffle(cache_stuffing.begin(), cache_stuffing.end());
+                std::shuffle(cache_stuffing.begin(), cache_stuffing.end(), random_engine);
                 for (auto&& key : cache_stuffing) {
                     cache.touch(key);
                 }
@@ -146,13 +147,14 @@ int main(int argc, char** argv) {
                 for (auto&& key : keys) {
                     cache.touch(key);
                 }
-                std::cout << "Free memory: " << memory::stats().free_memory() << "\n";
+                std::cout << "Reclaimable memory: " << reclaimable_memory() << "\n";
                 std::cout << "Cache occupancy: " << tracker.region().occupancy() << "\n";
             };
 
             std::deque<std::unique_ptr<char[]>> stuffing;
             auto fragment_free_space = [&] {
                 stuffing.clear();
+                std::cout << "Reclaimable memory: " << reclaimable_memory() << "\n";
                 std::cout << "Free memory: " << memory::stats().free_memory() << "\n";
                 std::cout << "Cache occupancy: " << tracker.region().occupancy() << "\n";
 
@@ -165,6 +167,7 @@ int main(int argc, char** argv) {
                 }
 
                 std::cout << "After fragmenting:\n";
+                std::cout << "Reclaimable memory: " << reclaimable_memory() << "\n";
                 std::cout << "Free memory: " << memory::stats().free_memory() << "\n";
                 std::cout << "Cache occupancy: " << tracker.region().occupancy() << "\n";
             };
@@ -173,16 +176,16 @@ int main(int argc, char** argv) {
 
             fragment_free_space();
 
-            cache.update(*mt, checker).get();
+            cache.update([] {}, *mt).get();
 
             stuffing.clear();
             cache_stuffing.clear();
 
             // Verify that all mutations from memtable went through
             for (auto&& key : keys) {
-                auto range = query::partition_range::make_singular(key);
-                auto reader = cache.make_reader(range);
-                auto mo = reader().get0();
+                auto range = dht::partition_range::make_singular(key);
+                auto reader = cache.make_reader(s, range);
+                auto mo = mutation_from_streamed_mutation(reader().get0()).get0();
                 assert(mo);
                 assert(mo->partition().live_row_count(*s) ==
                        row_count + 1 /* one row was already in cache before update()*/);
@@ -197,8 +200,8 @@ int main(int argc, char** argv) {
             }
 
             for (auto&& key : keys) {
-                auto range = query::partition_range::make_singular(key);
-                auto reader = cache.make_reader(range);
+                auto range = dht::partition_range::make_singular(key);
+                auto reader = cache.make_reader(s, range);
                 auto mo = reader().get0();
                 assert(mo);
             }
@@ -217,9 +220,11 @@ int main(int argc, char** argv) {
                 }
 
                 const mutation& m = make_large_mutation();
-                auto range = query::partition_range::make_singular(m.decorated_key());
+                auto range = dht::partition_range::make_singular(m.decorated_key());
 
                 cache.populate(m);
+
+                logalloc::shard_tracker().reclaim_all_free_segments();
 
                 {
                     logalloc::reclaim_lock _(tracker.region());
@@ -233,8 +238,10 @@ int main(int argc, char** argv) {
                 }
 
                 try {
-                    auto reader = cache.make_reader(range);
-                    reader().get0();
+                    auto reader = cache.make_reader(s, range);
+                    assert(!reader().get0());
+                    auto evicted_from_cache = logalloc::segment_size + large_cell_size;
+                    new char[evicted_from_cache + logalloc::segment_size];
                     assert(false); // The test is not invoking the case which it's supposed to test
                 } catch (const std::bad_alloc&) {
                     // expected

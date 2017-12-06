@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -50,23 +50,29 @@ public:
     virtual ~migration_listener()
     { }
 
+    // The callback runs inside seastar thread
     virtual void on_create_keyspace(const sstring& ks_name) = 0;
     virtual void on_create_column_family(const sstring& ks_name, const sstring& cf_name) = 0;
     virtual void on_create_user_type(const sstring& ks_name, const sstring& type_name) = 0;
     virtual void on_create_function(const sstring& ks_name, const sstring& function_name) = 0;
     virtual void on_create_aggregate(const sstring& ks_name, const sstring& aggregate_name) = 0;
+    virtual void on_create_view(const sstring& ks_name, const sstring& view_name) = 0;
 
+    // The callback runs inside seastar thread
     virtual void on_update_keyspace(const sstring& ks_name) = 0;
-    virtual void on_update_column_family(const sstring& ks_name, const sstring& cf_name) = 0;
+    virtual void on_update_column_family(const sstring& ks_name, const sstring& cf_name, bool columns_changed) = 0;
     virtual void on_update_user_type(const sstring& ks_name, const sstring& type_name) = 0;
     virtual void on_update_function(const sstring& ks_name, const sstring& function_name) = 0;
     virtual void on_update_aggregate(const sstring& ks_name, const sstring& aggregate_name) = 0;
+    virtual void on_update_view(const sstring& ks_name, const sstring& view_name, bool columns_changed) = 0;
 
+    // The callback runs inside seastar thread
     virtual void on_drop_keyspace(const sstring& ks_name) = 0;
     virtual void on_drop_column_family(const sstring& ks_name, const sstring& cf_name) = 0;
     virtual void on_drop_user_type(const sstring& ks_name, const sstring& type_name) = 0;
     virtual void on_drop_function(const sstring& ks_name, const sstring& function_name) = 0;
     virtual void on_drop_aggregate(const sstring& ks_name, const sstring& aggregate_name) = 0;
+    virtual void on_drop_view(const sstring& ks_name, const sstring& view_name) = 0;
 };
 
 }

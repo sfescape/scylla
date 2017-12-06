@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -25,7 +25,6 @@
 #include "query-result.hh"
 #include "mutation_reader.hh"
 #include "frozen_mutation.hh"
-#include "db/serializer.hh"
 
 class reconcilable_result;
 class frozen_reconcilable_result;
@@ -48,6 +47,11 @@ struct partition {
         return _m;
     }
 
+    frozen_mutation& mut() {
+        return _m;
+    }
+
+
     bool operator==(const partition& other) const {
         return _row_count == other._row_count && _m.representation() == other._m.representation();
     }
@@ -63,13 +67,16 @@ struct partition {
 // Can be read by other cores after publishing.
 class reconcilable_result {
     uint32_t _row_count;
+    query::short_read _short_read;
+    query::result_memory_tracker _memory_tracker;
     std::vector<partition> _partitions;
 public:
     ~reconcilable_result();
     reconcilable_result();
     reconcilable_result(reconcilable_result&&) = default;
     reconcilable_result& operator=(reconcilable_result&&) = default;
-    reconcilable_result(uint32_t row_count, std::vector<partition> partitions);
+    reconcilable_result(uint32_t row_count, std::vector<partition> partitions, query::short_read short_read,
+                        query::result_memory_tracker memory_tracker = { });
 
     const std::vector<partition>& partitions() const;
     std::vector<partition>& partitions();
@@ -78,21 +85,27 @@ public:
         return _row_count;
     }
 
+    query::short_read is_short_read() const {
+        return _short_read;
+    }
+
+    size_t memory_usage() const {
+        return _memory_tracker.used_memory();
+    }
+
     bool operator==(const reconcilable_result& other) const;
     bool operator!=(const reconcilable_result& other) const;
+
+    struct printer {
+        const reconcilable_result& self;
+        schema_ptr schema;
+        friend std::ostream& operator<<(std::ostream&, const printer&);
+    };
+
+    printer pretty_printer(schema_ptr) const;
 };
 
-query::result to_data_query_result(const reconcilable_result&, schema_ptr, const query::partition_slice&);
-
-namespace db {
-
-template<> serializer<reconcilable_result>::serializer(const reconcilable_result&);
-template<> void serializer<reconcilable_result>::write(output&, const reconcilable_result&);
-template<> void serializer<reconcilable_result>::read(reconcilable_result&, input&);
-
-extern template class serializer<reconcilable_result>;
-
-}
+query::result to_data_query_result(const reconcilable_result&, schema_ptr, const query::partition_slice&, uint32_t row_limit, uint32_t partition_limit, query::result_request result_type = query::result_request::only_result);
 
 // Performs a query on given data source returning data in reconcilable form.
 //
@@ -106,8 +119,30 @@ extern template class serializer<reconcilable_result>;
 //
 // 'source' doesn't have to survive deferring.
 future<reconcilable_result> mutation_query(
-    const mutation_source& source,
-    const query::partition_range& range,
+    schema_ptr,
+    mutation_source source,
+    const dht::partition_range& range,
     const query::partition_slice& slice,
     uint32_t row_limit,
-    gc_clock::time_point query_time);
+    uint32_t partition_limit,
+    gc_clock::time_point query_time,
+    query::result_memory_accounter&& accounter = { },
+    tracing::trace_state_ptr trace_ptr = nullptr);
+
+future<> data_query(
+    schema_ptr s,
+    const mutation_source& source,
+    const dht::partition_range& range,
+    const query::partition_slice& slice,
+    uint32_t row_limit,
+    uint32_t partition_limit,
+    gc_clock::time_point query_time,
+    query::result::builder& builder,
+    tracing::trace_state_ptr trace_ptr = nullptr);
+
+// Performs a query for counter updates.
+future<mutation_opt> counter_write_query(schema_ptr, const mutation_source&,
+                                         const dht::decorated_key& dk,
+                                         const query::partition_slice& slice,
+                                         tracing::trace_state_ptr trace_ptr);
+

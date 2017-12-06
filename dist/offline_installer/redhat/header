@@ -1,0 +1,51 @@
+#!/bin/bash -e
+#
+#  Copyright (C) 2017 ScyllaDB
+
+#
+# This file is part of Scylla.
+#
+# Scylla is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Scylla is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+
+print_usage() {
+    echo "scylla_offline_installer.sh -- --skip-setup"
+    echo "  --skip-setup skip running scylla_setup"
+    exit 1
+}
+
+SKIP_SETUP=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        "--skip-setup")
+            SKIP_SETUP=1
+            shift 1
+            ;;
+        *)
+            print_usage
+            ;;
+    esac
+done
+
+echo "Install Scylla offline package..."
+
+if [ "$(id -u)" != "0" ]; then
+    echo "Error: root user required"
+    exit 1
+fi
+yum install -y *.rpm
+if [ $SKIP_SETUP -eq 0 ]; then
+    /usr/lib/scylla/scylla_setup
+fi
+
+echo "Scylla offline package installation finished."

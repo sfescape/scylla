@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -120,12 +120,12 @@ sets::literal::to_string() const {
 }
 
 sets::value
-sets::value::from_serialized(bytes_view v, set_type type, serialization_format sf) {
+sets::value::from_serialized(bytes_view v, set_type type, cql_serialization_format sf) {
     try {
         // Collections have this small hack that validate cannot be called on a serialized object,
         // but compose does the validation (so we're fine).
         // FIXME: deserializeForNativeProtocol?!
-        auto s = boost::any_cast<set_type_impl::native_type>(type->deserialize(v, sf));
+        auto s = value_cast<set_type_impl::native_type>(type->deserialize(v, sf));
         std::set<bytes, serialized_compare> elements(type->get_elements_type()->as_less_comparator());
         for (auto&& element : s) {
             elements.insert(elements.end(), type->get_elements_type()->decompose(element));
@@ -136,13 +136,13 @@ sets::value::from_serialized(bytes_view v, set_type type, serialization_format s
     }
 }
 
-bytes_opt
+cql3::raw_value
 sets::value::get(const query_options& options) {
-    return get_with_protocol_version(options.get_serialization_format());
+    return cql3::raw_value::make_value(get_with_protocol_version(options.get_cql_serialization_format()));
 }
 
 bytes
-sets::value::get_with_protocol_version(serialization_format sf) {
+sets::value::get_with_protocol_version(cql_serialization_format sf) {
     return collection_type_impl::pack(_elements.begin(), _elements.end(),
             _elements.size(), sf);
 }
@@ -191,10 +191,12 @@ sets::delayed_value::bind(const query_options& options) {
     for (auto&& t : _elements) {
         auto b = t->bind_and_get(options);
 
-        if (!b) {
+        if (b.is_null()) {
             throw exceptions::invalid_request_exception("null is not supported inside collections");
         }
-
+        if (b.is_unset_value()) {
+            return constants::UNSET_VALUE;
+        }
         // We don't support value > 64K because the serialization format encode the length as an unsigned short.
         if (b->size() > std::numeric_limits<uint16_t>::max()) {
             throw exceptions::invalid_request_exception(sprint("Set value is too long. Set values are limited to %d bytes but %d bytes value provided",
@@ -211,16 +213,22 @@ sets::delayed_value::bind(const query_options& options) {
 ::shared_ptr<terminal>
 sets::marker::bind(const query_options& options) {
     const auto& value = options.get_value_at(_bind_index);
-    if (!value) {
+    if (value.is_null()) {
         return nullptr;
+    } else if (value.is_unset_value()) {
+        return constants::UNSET_VALUE;
     } else {
         auto as_set_type = static_pointer_cast<const set_type_impl>(_receiver->type);
-        return make_shared(value::from_serialized(*value, as_set_type, options.get_serialization_format()));
+        return make_shared(value::from_serialized(*value, as_set_type, options.get_cql_serialization_format()));
     }
 }
 
 void
-sets::setter::execute(mutation& m, const exploded_clustering_prefix& row_key, const update_parameters& params) {
+sets::setter::execute(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params) {
+    const auto& value = _t->bind(params._options);
+    if (value == constants::UNSET_VALUE) {
+        return;
+    }
     if (column.type->is_multi_cell()) {
         // delete + add
         collection_type_impl::mutation mut;
@@ -229,19 +237,22 @@ sets::setter::execute(mutation& m, const exploded_clustering_prefix& row_key, co
         auto col_mut = ctype->serialize_mutation_form(std::move(mut));
         m.set_cell(row_key, column, std::move(col_mut));
     }
-    adder::do_add(m, row_key, params, _t, column);
+    adder::do_add(m, row_key, params, value, column);
 }
 
 void
-sets::adder::execute(mutation& m, const exploded_clustering_prefix& row_key, const update_parameters& params) {
+sets::adder::execute(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params) {
+    const auto& value = _t->bind(params._options);
+    if (value == constants::UNSET_VALUE) {
+        return;
+    }
     assert(column.type->is_multi_cell()); // "Attempted to add items to a frozen set";
-    do_add(m, row_key, params, _t, column);
+    do_add(m, row_key, params, value, column);
 }
 
 void
-sets::adder::do_add(mutation& m, const exploded_clustering_prefix& row_key, const update_parameters& params,
-        shared_ptr<term> t, const column_definition& column) {
-    auto&& value = t->bind(params._options);
+sets::adder::do_add(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params,
+        shared_ptr<term> value, const column_definition& column) {
     auto set_value = dynamic_pointer_cast<sets::value>(std::move(value));
     auto set_type = dynamic_pointer_cast<const set_type_impl>(column.type);
     if (column.type->is_multi_cell()) {
@@ -258,21 +269,19 @@ sets::adder::do_add(mutation& m, const exploded_clustering_prefix& row_key, cons
         auto smut = set_type->serialize_mutation_form(mut);
 
         m.set_cell(row_key, column, std::move(smut));
-    } else {
+    } else if (set_value != nullptr) {
         // for frozen sets, we're overwriting the whole cell
         auto v = set_type->serialize_partially_deserialized_form(
                 {set_value->_elements.begin(), set_value->_elements.end()},
-                serialization_format::internal());
-        if (set_value->_elements.empty()) {
-            m.set_cell(row_key, column, params.make_dead_cell());
-        } else {
-            m.set_cell(row_key, column, params.make_cell(std::move(v)));
-        }
+                cql_serialization_format::internal());
+        m.set_cell(row_key, column, params.make_cell(std::move(v)));
+    } else {
+        m.set_cell(row_key, column, params.make_dead_cell());
     }
 }
 
 void
-sets::discarder::execute(mutation& m, const exploded_clustering_prefix& row_key, const update_parameters& params) {
+sets::discarder::execute(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params) {
     assert(column.type->is_multi_cell()); // "Attempted to remove items from a frozen set";
 
     auto&& value = _t->bind(params._options);
@@ -284,21 +293,29 @@ sets::discarder::execute(mutation& m, const exploded_clustering_prefix& row_key,
     auto kill = [&] (bytes idx) {
         mut.cells.push_back({std::move(idx), params.make_dead_cell()});
     };
-    // This can be either a set or a single element
-    auto cvalue = dynamic_pointer_cast<constants::value>(value);
-    if (cvalue) {
-        kill(cvalue->_bytes ? *cvalue->_bytes : bytes());
-    } else {
-        auto svalue = static_pointer_cast<sets::value>(value);
-        mut.cells.reserve(svalue->_elements.size());
-        for (auto&& e : svalue->_elements) {
-            kill(e);
-        }
+    auto svalue = dynamic_pointer_cast<sets::value>(value);
+    assert(svalue);
+    mut.cells.reserve(svalue->_elements.size());
+    for (auto&& e : svalue->_elements) {
+        kill(e);
     }
     auto ctype = static_pointer_cast<const collection_type_impl>(column.type);
     m.set_cell(row_key, column,
             atomic_cell_or_collection::from_collection_mutation(
                     ctype->serialize_mutation_form(mut)));
+}
+
+void sets::element_discarder::execute(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params)
+{
+    assert(column.type->is_multi_cell() && "Attempted to remove items from a frozen set");
+    auto elt = _t->bind(params._options);
+    if (!elt) {
+        throw exceptions::invalid_request_exception("Invalid null set element");
+    }
+    collection_type_impl::mutation mut;
+    mut.cells.emplace_back(*elt->get(params._options), params.make_dead_cell());
+    auto ctype = static_pointer_cast<const collection_type_impl>(column.type);
+    m.set_cell(row_key, column, ctype->serialize_mutation_form(mut));
 }
 
 }

@@ -178,6 +178,22 @@
          ]
       },
       {
+         "path":"/storage_service/scylla_release_version",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Fetch a string representation of the Scylla version.",
+               "type":"string",
+               "nickname":"get_scylla_release_version",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
          "path":"/storage_service/schema_version",
          "operations":[
             {
@@ -291,6 +307,25 @@
          ]
       },
       {
+         "path":"/storage_service/describe_ring/",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"The TokenRange for a any keyspace",
+               "type":"array",
+               "items":{
+                  "type":"token_range"
+               },
+               "nickname":"describe_any_ring",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
          "path":"/storage_service/describe_ring/{keyspace}",
          "operations":[
             {
@@ -298,9 +333,9 @@
                "summary":"The TokenRange for a given keyspace",
                "type":"array",
                "items":{
-                  "type":"string"
+                  "type":"token_range"
                },
-               "nickname":"describe_ring_jmx",
+               "nickname":"describe_ring",
                "produces":[
                   "application/json"
                ],
@@ -311,7 +346,7 @@
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
-                     "paramType":"query"
+                     "paramType":"path"
                   }
                ]
             }
@@ -406,7 +441,7 @@
                "summary":"load value. Keys are IP addresses",
                "type":"array",
                "items":{
-                  "type":"mapper"
+                  "type":"map_string_double"
                },
                "nickname":"get_load_map",
                "produces":[
@@ -609,7 +644,7 @@
          "path":"/storage_service/keyspace_cleanup/{keyspace}",
          "operations":[
             {
-               "method":"GET",
+               "method":"POST",
                "summary":"Trigger a cleanup of keys on a single keyspace",
                "type":"int",
                "nickname":"force_keyspace_cleanup",
@@ -778,8 +813,88 @@
                      "paramType":"path"
                   },
                   {
-                     "name":"options",
-                     "description":"Options for the repair",
+                     "name":"primaryRange",
+                     "description":"If the value is the string 'true' with any capitalization, repair only the first range returned by the partitioner.",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"parallelism",
+                     "description":"Repair parallelism, can be 0 (sequential), 1 (parallel) or 2 (datacenter-aware).",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"incremental",
+                     "description":"If the value is the string 'true' with any capitalization, perform incremental repair.",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"jobThreads",
+                     "description":"An integer specifying the parallelism on each node.",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"ranges",
+                     "description":"An explicit list of ranges to repair, overriding the default choice. Each range is expressed as token1:token2, and multiple ranges can be given as a comma separated list.",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"startToken",
+                     "description":"Token on which to begin repair",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"endToken",
+                     "description":"Token on which to end repair",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"columnFamilies",
+                     "description":"Which column families to repair in the given keyspace. Multiple columns families can be named separated by commas. If this option is missing, all column families in the keyspace are repaired.",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"dataCenters",
+                     "description":"Which data centers are to participate in this repair. Multiple data centers can be listed separated by commas.",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"hosts",
+                     "description":"Which hosts are to participate in this repair. Multiple hosts can be listed separated by commas.",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"trace",
+                     "description":"If the value is the string 'true' with any capitalization, enable tracing of the repair.",
                      "required":false,
                      "allowMultiple":false,
                      "type":"string",
@@ -829,6 +944,22 @@
                "summary":"Force terminate all repair sessions",
                "type":"void",
                "nickname":"force_terminate_all_repair_sessions",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/storage_service/force_terminate_repair",
+         "operations":[
+            {
+               "method":"POST",
+               "summary":"Force terminate all repair sessions",
+               "type":"void",
+               "nickname":"force_terminate_all_repair_sessions_new",
                "produces":[
                   "application/json"
                ],
@@ -890,8 +1021,8 @@
                ],
                "parameters":[
                   {
-                     "name":"token",
-                     "description":"The token to remove",
+                     "name":"host_id",
+                     "description":"Remove the node with host_id from the cluster",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1086,11 +1217,12 @@
                ],
                "parameters":[
                   {
-                     "name":"non_system",
-                     "description":"When set to true limit to non system",
+                     "name":"type",
+                     "description":"Which keyspaces to return",
                      "required":false,
                      "allowMultiple":false,
-                     "type":"boolean",
+                     "type":"string",
+                     "enum": [ "all", "user", "non_local_strategy" ],
                      "paramType":"query"
                   }
                ]
@@ -1622,6 +1754,57 @@
          ]
       },
       {
+         "path":"/storage_service/slow_query",
+         "operations":[
+            {
+               "method":"POST",
+               "summary":"Set slow query parameter",
+               "type":"void",
+               "nickname":"set_slow_query",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+                  {
+                     "name":"enable",
+                     "description":"set it to true to enable, anything else to disable",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"boolean",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"ttl",
+                     "description":"TTL in seconds",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"long",
+                     "paramType":"query"
+                  },
+                  {
+                     "name":"threshold",
+                     "description":"Slow query record threshold in microseconds",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"long",
+                     "paramType":"query"
+                  }
+               ]
+            },
+            {
+               "method":"GET",
+               "summary":"Returns the slow query record configuration.",
+               "type":"slow_query_info",
+               "nickname":"get_slow_query_info",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
          "path":"/storage_service/auto_compaction/{keyspace}",
          "operations":[
             {
@@ -1945,6 +2128,20 @@
             }
          }
       },
+      "map_string_double":{
+         "id":"map_string_double",
+         "description":"A key value mapping between a string and a double",
+         "properties":{
+            "key":{
+               "type":"string",
+               "description":"The key"
+            },
+            "value":{
+               "type":"double",
+               "description":"The value"
+            }
+         }
+      },
       "maplist_mapper":{
          "id":"maplist_mapper",
          "description":"A key value mapping, where key and value are list",
@@ -1969,9 +2166,9 @@
          "id":"snapshot",
          "description":"Snapshot detail",
          "properties":{
-            "key":{
+            "ks":{
                "type":"string",
-               "description":"The key snapshot key"
+               "description":"The key space snapshot key"
             },
             "cf":{
                "type":"string",
@@ -1993,7 +2190,7 @@
          "properties":{
             "key":{
                "type":"string",
-               "description":"The keyspace"
+               "description":"The snapshot key"
             },
             "value":{
                "type":"array",
@@ -2001,6 +2198,77 @@
                   "type":"snapshot"
                },
                "description":"The column family"
+            }
+         }
+      },
+      "slow_query_info": {
+         "id":"slow_query_info",
+         "description":"Slow query triggering information",
+         "properties":{
+            "enable":{
+               "type":"boolean",
+               "description":"Is slow query logging enable or disable"
+            },
+            "ttl":{
+               "type":"long",
+               "description":"The slow query TTL in seconds"
+            },
+            "threshold":{
+               "type":"long",
+               "description":"The slow query logging threshold in microseconds. Queries that takes longer, will be logged"
+            }
+         }
+      },
+      "endpoint_detail":{
+         "id":"endpoint_detail",
+         "description":"Endpoint detail",
+         "properties":{
+            "host":{
+               "type":"string",
+               "description":"The endpoint host"
+            },
+            "datacenter":{
+               "type":"string",
+               "description":"The endpoint datacenter"
+            },
+            "rack":{
+               "type":"string",
+               "description":"The endpoint rack"
+            }
+         }
+      },
+      "token_range":{
+         "id":"token_range",
+         "description":"Endpoint range information",
+         "properties":{
+            "start_token":{
+               "type":"string",
+               "description":"The range start token"
+            },
+            "end_token":{
+               "type":"string",
+               "description":"The range start token"
+            },
+            "endpoints":{
+               "type":"array",
+               "items":{
+                  "type":"string"
+               },
+               "description":"The endpoints"
+            },
+            "rpc_endpoints":{
+               "type":"array",
+               "items":{
+                  "type":"string"
+               },
+               "description":"The rpc endpoints"
+            },
+            "endpoint_details":{
+               "type":"array",
+               "items":{
+                  "type":"endpoint_detail"
+               },
+               "description":"The endpoint details"
             }
          }
       }

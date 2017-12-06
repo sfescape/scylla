@@ -17,8 +17,8 @@
  */
 
 /*
- * Modified by Cloudius Systems
- * Copyright 2015 Cloudius Systems
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -62,6 +62,8 @@ namespace cql3 {
     class query_processor;
 }
 
+bool is_system_keyspace(const sstring& ks_name);
+
 namespace db {
 namespace system_keyspace {
 
@@ -79,18 +81,73 @@ static constexpr auto COMPACTION_HISTORY = "compaction_history";
 static constexpr auto SSTABLE_ACTIVITY = "sstable_activity";
 static constexpr auto SIZE_ESTIMATES = "size_estimates";
 
+namespace v3 {
+static constexpr auto BATCHES = "batches";
+static constexpr auto PAXOS = "paxos";
+static constexpr auto BUILT_INDEXES = "IndexInfo";
+static constexpr auto LOCAL = "local";
+static constexpr auto PEERS = "peers";
+static constexpr auto PEER_EVENTS = "peer_events";
+static constexpr auto RANGE_XFERS = "range_xfers";
+static constexpr auto COMPACTION_HISTORY = "compaction_history";
+static constexpr auto SSTABLE_ACTIVITY = "sstable_activity";
+static constexpr auto SIZE_ESTIMATES = "size_estimates";
+static constexpr auto AVAILABLE_RANGES = "available_ranges";
+static constexpr auto VIEWS_BUILDS_IN_PROGRESS = "views_builds_in_progress";
+static constexpr auto BUILT_VIEWS = "built_views";
+}
+
+namespace legacy {
+static constexpr auto HINTS = "hints";
+static constexpr auto BATCHLOG = "batchlog";
+static constexpr auto KEYSPACES = "schema_keyspaces";
+static constexpr auto COLUMNFAMILIES = "schema_columnfamilies";
+static constexpr auto COLUMNS = "schema_columns";
+static constexpr auto TRIGGERS = "schema_triggers";
+static constexpr auto USERTYPES = "schema_usertypes";
+static constexpr auto FUNCTIONS = "schema_functions";
+static constexpr auto AGGREGATES = "schema_aggregates";
+}
+
+// Partition estimates for a given range of tokens.
+struct range_estimates {
+    schema_ptr schema;
+    bytes range_start_token;
+    bytes range_end_token;
+    int64_t partitions_count;
+    int64_t mean_partition_size;
+};
 
 extern schema_ptr hints();
 extern schema_ptr batchlog();
 extern schema_ptr built_indexes(); // TODO (from Cassandra): make private
 
+namespace legacy {
+
+schema_ptr keyspaces();
+schema_ptr column_families();
+schema_ptr columns();
+schema_ptr triggers();
+schema_ptr usertypes();
+schema_ptr functions();
+schema_ptr aggregates();
+
+}
+
+table_schema_version generate_schema_version(utils::UUID table_id);
+
+// Only for testing.
+void minimal_setup(distributed<database>& db, distributed<cql3::query_processor>& qp);
+
 future<> init_local_cache();
+future<> deinit_local_cache();
 future<> setup(distributed<database>& db, distributed<cql3::query_processor>& qp);
 future<> update_schema_version(utils::UUID version);
 future<> update_tokens(std::unordered_set<dht::token> tokens);
 future<> update_tokens(gms::inet_address ep, std::unordered_set<dht::token> tokens);
 
 future<> update_preferred_ip(gms::inet_address ep, gms::inet_address preferred_ip);
+future<std::unordered_map<gms::inet_address, gms::inet_address>> get_preferred_ips();
 
 template <typename Value>
 future<> update_peer_info(gms::inet_address ep, sstring column_name, Value value);
@@ -101,6 +158,13 @@ future<> update_hints_dropped(gms::inet_address ep, utils::UUID time_period, int
 
 std::vector<schema_ptr> all_tables();
 void make(database& db, bool durable, bool volatile_testing_only = false);
+
+future<bool>
+is_index_built(const sstring& ks_name, const sstring& index_name);
+future<>
+set_index_built(const sstring& ks_name, const sstring& index_name);
+future<>
+set_index_removed(const sstring& ks_name, const sstring& index_name);
 
 future<foreign_ptr<lw_shared_ptr<reconcilable_result>>>
 query_mutations(distributed<service::storage_proxy>& proxy, const sstring& cf_name);
@@ -116,6 +180,29 @@ future<lw_shared_ptr<query::result_set>> query(
     const sstring& cf_name,
     const dht::decorated_key& key,
     query::clustering_range row_ranges = query::clustering_range::make_open_ended_both_sides());
+
+/// overloads
+
+future<foreign_ptr<lw_shared_ptr<reconcilable_result>>>
+query_mutations(distributed<service::storage_proxy>& proxy,
+                const sstring& ks_name,
+                const sstring& cf_name);
+
+// Returns all data from given system table.
+// Intended to be used by code which is not performance critical.
+future<lw_shared_ptr<query::result_set>> query(distributed<service::storage_proxy>& proxy,
+                const sstring& ks_name,
+                const sstring& cf_name);
+
+// Returns a slice of given system table.
+// Intended to be used by code which is not performance critical.
+future<lw_shared_ptr<query::result_set>> query(
+    distributed<service::storage_proxy>& proxy,
+    const sstring& ks_name,
+    const sstring& cf_name,
+    const dht::decorated_key& key,
+    query::clustering_range row_ranges = query::clustering_range::make_open_ended_both_sides());
+
 
 /**
  * Return a map of IP addresses containing a map of dc and rack info
@@ -149,7 +236,8 @@ load_dc_rack_info();
 enum class bootstrap_state {
     NEEDS_BOOTSTRAP,
     COMPLETED,
-    IN_PROGRESS
+    IN_PROGRESS,
+    DECOMMISSIONED
 };
 
 #if 0
@@ -254,30 +342,36 @@ enum class bootstrap_state {
         compactionLog.truncateBlocking();
     }
 
-    public static void updateCompactionHistory(String ksname,
-                                               String cfname,
-                                               long compactedAt,
-                                               long bytesIn,
-                                               long bytesOut,
-                                               Map<Integer, Long> rowsMerged)
-    {
-        // don't write anything when the history table itself is compacted, since that would in turn cause new compactions
-        if (ksname.equals("system") && cfname.equals(COMPACTION_HISTORY))
-            return;
-        String req = "INSERT INTO system.%s (id, keyspace_name, columnfamily_name, compacted_at, bytes_in, bytes_out, rows_merged) VALUES (?, ?, ?, ?, ?, ?, ?)";
-        executeInternal(String.format(req, COMPACTION_HISTORY), UUIDGen.getTimeUUID(), ksname, cfname, ByteBufferUtil.bytes(compactedAt), bytesIn, bytesOut, rowsMerged);
-    }
-
     public static TabularData getCompactionHistory() throws OpenDataException
     {
         UntypedResultSet queryResultSet = executeInternal(String.format("SELECT * from system.%s", COMPACTION_HISTORY));
         return CompactionHistoryTabularData.from(queryResultSet);
     }
 #endif
-    future<> save_truncation_record(cql3::query_processor&, const column_family&, db_clock::time_point truncated_at, const db::replay_position&);
-    future<> remove_truncation_record(cql3::query_processor&, utils::UUID);
-    future<db::replay_position> get_truncated_position(cql3::query_processor&, utils::UUID);
-    future<db_clock::time_point> get_truncated_at(cql3::query_processor&, utils::UUID);
+    struct compaction_history_entry {
+        utils::UUID id;
+        sstring ks;
+        sstring cf;
+        int64_t compacted_at = 0;
+        int64_t bytes_in = 0;
+        int64_t bytes_out = 0;
+        // Key: number of rows merged
+        // Value: counter
+        std::unordered_map<int32_t, int64_t> rows_merged;
+    };
+
+    future<> update_compaction_history(sstring ksname, sstring cfname, int64_t compacted_at, int64_t bytes_in, int64_t bytes_out,
+                                       std::unordered_map<int32_t, int64_t> rows_merged);
+    future<std::vector<compaction_history_entry>> get_compaction_history();
+
+    typedef std::vector<db::replay_position> replay_positions;
+
+    future<> save_truncation_record(const column_family&, db_clock::time_point truncated_at, db::replay_position);
+    future<> save_truncation_records(const column_family&, db_clock::time_point truncated_at, replay_positions);
+    future<> remove_truncation_record(utils::UUID);
+    future<replay_positions> get_truncated_position(utils::UUID);
+    future<db::replay_position> get_truncated_position(utils::UUID, uint32_t shard);
+    future<db_clock::time_point> get_truncated_at(utils::UUID);
 
 #if 0
 
@@ -387,130 +481,15 @@ enum class bootstrap_state {
      */
     future<std::unordered_map<gms::inet_address, utils::UUID>> load_host_ids();
 
-#if 0
-    /**
-     * Get preferred IP for given endpoint if it is known. Otherwise this returns given endpoint itself.
-     *
-     * @param ep endpoint address to check
-     * @return Preferred IP for given endpoint if present, otherwise returns given ep
-     */
-    public static InetAddress getPreferredIP(InetAddress ep)
-    {
-        String req = "SELECT preferred_ip FROM system.%s WHERE peer=?";
-        UntypedResultSet result = executeInternal(String.format(req, PEERS), ep);
-        if (!result.isEmpty() && result.one().has("preferred_ip"))
-            return result.one().getInetAddress("preferred_ip");
-        return ep;
-    }
-
-    /**
-     * Return a map of IP addresses containing a map of dc and rack info
-     */
-    public static Map<InetAddress, Map<String,String>> loadDcRackInfo()
-    {
-        Map<InetAddress, Map<String, String>> result = new HashMap<>();
-        for (UntypedResultSet.Row row : executeInternal("SELECT peer, data_center, rack from system." + PEERS))
-        {
-            InetAddress peer = row.getInetAddress("peer");
-            if (row.has("data_center") && row.has("rack"))
-            {
-                Map<String, String> dcRack = new HashMap<>();
-                dcRack.put("data_center", row.getString("data_center"));
-                dcRack.put("rack", row.getString("rack"));
-                result.put(peer, dcRack);
-            }
-        }
-        return result;
-    }
-
-    /**
-     * One of three things will happen if you try to read the system keyspace:
-     * 1. files are present and you can read them: great
-     * 2. no files are there: great (new node is assumed)
-     * 3. files are present but you can't read them: bad
-     * @throws ConfigurationException
-     */
-    public static void checkHealth() throws ConfigurationException
-    {
-        Keyspace keyspace;
-        try
-        {
-            keyspace = Keyspace.open(NAME);
-        }
-        catch (AssertionError err)
-        {
-            // this happens when a user switches from OPP to RP.
-            ConfigurationException ex = new ConfigurationException("Could not read system keyspace!");
-            ex.initCause(err);
-            throw ex;
-        }
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(LOCAL);
-
-        String req = "SELECT cluster_name FROM system.%s WHERE key='%s'";
-        UntypedResultSet result = executeInternal(String.format(req, LOCAL, LOCAL));
-
-        if (result.isEmpty() || !result.one().has("cluster_name"))
-        {
-            // this is a brand new node
-            if (!cfs.getSSTables().isEmpty())
-                throw new ConfigurationException("Found system keyspace files, but they couldn't be loaded!");
-
-            // no system files.  this is a new node.
-            req = "INSERT INTO system.%s (key, cluster_name) VALUES ('%s', ?)";
-            executeInternal(String.format(req, LOCAL, LOCAL), DatabaseDescriptor.getClusterName());
-            return;
-        }
-
-        String savedClusterName = result.one().getString("cluster_name");
-        if (!DatabaseDescriptor.getClusterName().equals(savedClusterName))
-            throw new ConfigurationException("Saved cluster name " + savedClusterName + " != configured name " + DatabaseDescriptor.getClusterName());
-    }
-
-#endif
     future<std::unordered_set<dht::token>> get_saved_tokens();
-#if 0
 
-    public static int incrementAndGetGeneration()
-    {
-        String req = "SELECT gossip_generation FROM system.%s WHERE key='%s'";
-        UntypedResultSet result = executeInternal(String.format(req, LOCAL, LOCAL));
+    future<std::unordered_map<gms::inet_address, sstring>> load_peer_features();
 
-        int generation;
-        if (result.isEmpty() || !result.one().has("gossip_generation"))
-        {
-            // seconds-since-epoch isn't a foolproof new generation
-            // (where foolproof is "guaranteed to be larger than the last one seen at this ip address"),
-            // but it's as close as sanely possible
-            generation = (int) (System.currentTimeMillis() / 1000);
-        }
-        else
-        {
-            // Other nodes will ignore gossip messages about a node that have a lower generation than previously seen.
-            final int storedGeneration = result.one().getInt("gossip_generation") + 1;
-            final int now = (int) (System.currentTimeMillis() / 1000);
-            if (storedGeneration >= now)
-            {
-                logger.warn("Using stored Gossip Generation {} as it is greater than current system time {}.  See CASSANDRA-3654 if you experience problems",
-                            storedGeneration, now);
-                generation = storedGeneration;
-            }
-            else
-            {
-                generation = now;
-            }
-        }
-
-        req = "INSERT INTO system.%s (key, gossip_generation) VALUES ('%s', ?)";
-        executeInternal(String.format(req, LOCAL, LOCAL), generation);
-        forceBlockingFlush(LOCAL);
-
-        return generation;
-    }
-#endif
-
+future<int> increment_and_get_generation();
 bool bootstrap_complete();
 bool bootstrap_in_progress();
 bootstrap_state get_bootstrap_state();
+bool was_decommissioned();
 future<> set_bootstrap_state(bootstrap_state state);
 
 #if 0
@@ -660,5 +639,13 @@ future<> set_bootstrap_state(bootstrap_state state);
         executeInternal(String.format(cql, SSTABLE_ACTIVITY), keyspace, table, generation);
     }
 #endif
+
+    api::timestamp_type schema_creation_timestamp();
+
+/**
+ * Builds a mutation for SIZE_ESTIMATES_CF containing the specified estimates.
+ */
+mutation make_size_estimates_mutation(const sstring& ks, std::vector<range_estimates> estimates);
+
 } // namespace system_keyspace
 } // namespace db

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -21,14 +21,18 @@
 
 #pragma once
 
+#include <functional>
+
 #include "timestamp.hh"
 #include "gc_clock.hh"
+#include "hashing.hh"
+#include "utils/with_relational_operators.hh"
 
 /**
  * Represents deletion operation. Can be commuted with other tombstones via apply() method.
  * Can be empty.
  */
-struct tombstone final {
+struct tombstone final : public with_relational_operators<tombstone> {
     api::timestamp_type timestamp;
     gc_clock::time_point deletion_time;
 
@@ -55,38 +59,25 @@ struct tombstone final {
         }
     }
 
-    bool operator<(const tombstone& t) const {
-        return compare(t) < 0;
-    }
-
-    bool operator<=(const tombstone& t) const {
-        return compare(t) <= 0;
-    }
-
-    bool operator>(const tombstone& t) const {
-        return compare(t) > 0;
-    }
-
-    bool operator>=(const tombstone& t) const {
-        return compare(t) >= 0;
-    }
-
-    bool operator==(const tombstone& t) const {
-        return compare(t) == 0;
-    }
-
-    bool operator!=(const tombstone& t) const {
-        return compare(t) != 0;
-    }
-
     explicit operator bool() const {
         return timestamp != api::missing_timestamp;
     }
 
-    void apply(const tombstone& t) {
+    void apply(const tombstone& t) noexcept {
         if (*this < t) {
             *this = t;
         }
+    }
+
+    // See reversibly_mergeable.hh
+    void apply_reversibly(tombstone& t) noexcept {
+        std::swap(*this, t);
+        apply(t);
+    }
+
+    // See reversibly_mergeable.hh
+    void revert(tombstone& t) noexcept {
+        std::swap(*this, t);
     }
 
     friend std::ostream& operator<<(std::ostream& out, const tombstone& t) {
@@ -98,5 +89,16 @@ struct tombstone final {
     }
 };
 
+template<>
+struct appending_hash<tombstone> {
+    template<typename Hasher>
+    void operator()(Hasher& h, const tombstone& t) const {
+        feed_hash(h, t.timestamp);
+        feed_hash(h, t.deletion_time);
+    }
+};
 
+// Determines whether tombstone may be GC-ed.
+using can_gc_fn = std::function<bool(tombstone)>;
 
+static can_gc_fn always_gc = [] (tombstone) { return true; };

@@ -4,3 +4,17 @@
 build
 build.ninja
 cscope.*
+/debian/
+dist/ami/files/*.rpm
+dist/ami/variables.json
+dist/ami/scylla_deploy.sh
+*.pyc
+Cql.tokens
+.kdev4
+*.kdev4
+CMakeLists.txt.user
+.cache
+.tox
+*.egg-info
+__pycache__CMakeLists.txt.user
+.gdbinit

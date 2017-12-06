@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -53,15 +53,15 @@ class drop_keyspace_statement : public schema_altering_statement {
 public:
     drop_keyspace_statement(const sstring& keyspace, bool if_exists);
 
-    virtual void check_access(const service::client_state& state) override;
+    virtual future<> check_access(const service::client_state& state) override;
 
     virtual void validate(distributed<service::storage_proxy>&, const service::client_state& state) override;
 
     virtual const sstring& keyspace() const override;
 
-    virtual future<bool> announce_migration(distributed<service::storage_proxy>& proxy, bool is_local_only) override;
+    virtual future<shared_ptr<cql_transport::event::schema_change>> announce_migration(distributed<service::storage_proxy>& proxy, bool is_local_only) override;
 
-    virtual shared_ptr<transport::event::schema_change> change_event() override;
+    virtual std::unique_ptr<prepared> prepare(database& db, cql_stats& stats) override;
 };
 
 }

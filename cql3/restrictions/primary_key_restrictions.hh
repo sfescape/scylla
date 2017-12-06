@@ -18,9 +18,9 @@
 
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -67,7 +67,7 @@ template<typename ValueType>
 struct range_type_for;
 
 template<>
-struct range_type_for<partition_key> : public std::remove_reference<query::partition_range> {};
+struct range_type_for<partition_key> : public std::remove_reference<dht::partition_range> {};
 template<>
 struct range_type_for<clustering_key_prefix> : public std::remove_reference<query::clustering_range> {};
 
@@ -87,6 +87,7 @@ public:
     virtual std::vector<bounds_range_type> bounds_ranges(const query_options& options) const = 0;
 
     using restrictions::uses_function;
+    using restrictions::has_supporting_index;
 
     bool empty() const override {
         return get_column_defs().empty();

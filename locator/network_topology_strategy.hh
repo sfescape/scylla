@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -72,7 +72,7 @@ protected:
      * progress in each DC, rack etc.
      */
     virtual std::vector<inet_address> calculate_natural_endpoints(
-        const token& search_token) const override;
+        const token& search_token, token_metadata& tm) const override;
 
     virtual void validate_options() const override;
 

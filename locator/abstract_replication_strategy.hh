@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -41,6 +41,7 @@ enum class replication_strategy_type {
     simple,
     local,
     network_topology,
+    everywhere_topology,
 };
 
 class abstract_replication_strategy {
@@ -79,8 +80,6 @@ protected:
 
     void validate_replication_factor(sstring rf) const;
 
-    virtual std::vector<inet_address> calculate_natural_endpoints(const token& search_token) const = 0;
-
 public:
     abstract_replication_strategy(
         const sstring& keyspace_name,
@@ -88,6 +87,7 @@ public:
         snitch_ptr& snitch,
         const std::map<sstring, sstring>& config_options,
         replication_strategy_type my_type);
+    virtual std::vector<inet_address> calculate_natural_endpoints(const token& search_token, token_metadata& tm) const = 0;
     virtual ~abstract_replication_strategy() {}
     static std::unique_ptr<abstract_replication_strategy> create_replication_strategy(const sstring& ks_name, const sstring& strategy_name, token_metadata& token_metadata, const std::map<sstring, sstring>& config_options);
     static void validate_replication_strategy(const sstring& ks_name,
@@ -102,17 +102,25 @@ public:
     replication_strategy_type get_type() const { return _my_type; }
 
     // get_ranges() returns the list of ranges held by the given endpoint.
+    // The list is sorted, and its elements are non overlapping and non wrap-around.
     // It the analogue of Origin's getAddressRanges().get(endpoint).
     // This function is not efficient, and not meant for the fast path.
-    std::vector<range<token>> get_ranges(inet_address ep) const;
+    dht::token_range_vector get_ranges(inet_address ep) const;
     // get_primary_ranges() returns the list of "primary ranges" for the given
     // endpoint. "Primary ranges" are the ranges that the node is responsible
     // for storing replica primarily, which means this is the first node
     // returned calculate_natural_endpoints().
     // This function is the analogue of Origin's
     // StorageService.getPrimaryRangesForEndpoint().
-    std::vector<range<token>> get_primary_ranges(inet_address ep);
+    dht::token_range_vector get_primary_ranges(inet_address ep);
 
+    std::unordered_multimap<inet_address, dht::token_range> get_address_ranges(token_metadata& tm) const;
+
+    std::unordered_multimap<dht::token_range, inet_address> get_range_addresses(token_metadata& tm) const;
+
+    dht::token_range_vector get_pending_address_ranges(token_metadata& tm, token pending_token, inet_address pending_address);
+
+    dht::token_range_vector get_pending_address_ranges(token_metadata& tm, std::unordered_set<token> pending_tokens, inet_address pending_address);
 };
 
 }

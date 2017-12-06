@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -24,7 +24,6 @@
 
 namespace api {
 
-using namespace scollectd;
 using namespace json;
 namespace hh = httpd::hinted_handoff_json;
 

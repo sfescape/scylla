@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -94,6 +94,26 @@ public:
         return true;
     }
 
+    /**
+     * Whether the specified row satisfied this restriction.
+     * Assumes the row is live, but not all cells. If a cell
+     * isn't live and there's a restriction on its column,
+     * then the function returns false.
+     *
+     * @param schema the schema the row belongs to
+     * @param key the partition key
+     * @param ckey the clustering key
+     * @param cells the remaining row columns
+     * @return the restriction resulting of the merge
+     * @throws InvalidRequestException if the restrictions cannot be merged
+     */
+    virtual bool is_satisfied_by(const schema& schema,
+                                 const partition_key& key,
+                                 const clustering_key_prefix& ckey,
+                                 const row& cells,
+                                 const query_options& options,
+                                 gc_clock::time_point now) const = 0;
+
 protected:
 #if 0
     protected static ByteBuffer validateIndexedValue(ColumnSpecification columnSpec,
@@ -113,7 +133,7 @@ protected:
      * @param function_name the function name
      * @return <code>true</code> if the specified term is using the specified function, <code>false</code> otherwise.
      */
-    static bool uses_function(::shared_ptr<term> term, const sstring& ks_name, const sstring& function_name) {
+    static bool term_uses_function(::shared_ptr<term> term, const sstring& ks_name, const sstring& function_name) {
         return bool(term) && term->uses_function(ks_name, function_name);
     }
 
@@ -125,9 +145,9 @@ protected:
      * @param function_name the function name
      * @return <code>true</code> if one of the specified term is using the specified function, <code>false</code> otherwise.
      */
-    static bool uses_function(const std::vector<::shared_ptr<term>>& terms, const sstring& ks_name, const sstring& function_name) {
+    static bool term_uses_function(const std::vector<::shared_ptr<term>>& terms, const sstring& ks_name, const sstring& function_name) {
         for (auto&& value : terms) {
-            if (uses_function(value, ks_name, function_name)) {
+            if (term_uses_function(value, ks_name, function_name)) {
                 return true;
             }
         }

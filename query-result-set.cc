@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -21,6 +21,8 @@
 
 #include "query-result-set.hh"
 #include "query-result-reader.hh"
+#include "partition_slice_builder.hh"
+#include "mutation.hh"
 
 namespace query {
 
@@ -51,7 +53,7 @@ private:
 std::ostream& operator<<(std::ostream& out, const result_set_row& row) {
     for (auto&& cell : row._cells) {
         auto&& type = cell.second.type();
-        auto&& value = cell.second.value();
+        auto&& value = cell.second;
         out << cell.first << "=\"" << type->to_string(type->decompose(value)) << "\" ";
     }
     return out;
@@ -139,6 +141,9 @@ result_set_builder::deserialize(const clustering_key& key)
     std::unordered_map<sstring, data_value> cells;
     auto i = key.begin(*_schema);
     for (auto&& col : _schema->clustering_key_columns()) {
+        if (i == key.end(*_schema)) {
+            break;
+        }
         cells.emplace(col.name_as_text(), col.type->deserialize_value(*i));
         ++i;
     }
@@ -169,9 +174,10 @@ result_set_builder::deserialize(const result_row_view& row, bool is_static)
             auto cell = i.next_collection_cell();
             if (cell) {
                 auto ctype = static_pointer_cast<const collection_type_impl>(col.type);
-                auto view = cell.value();
-                auto normal_form = ctype->to_value(ctype->deserialize_mutation_form(view), serialization_format::internal());
-                cells.emplace(col.name_as_text(), col.type->deserialize_value(normal_form));
+                if (_slice.options.contains<partition_slice::option::collections_as_maps>()) {
+                    ctype = map_type_impl::get_instance(ctype->name_comparator(), ctype->value_comparator(), true);
+                }
+                cells.emplace(col.name_as_text(), ctype->deserialize_value(*cell, _slice.cql_format()));
             }
         }
     }
@@ -180,20 +186,16 @@ result_set_builder::deserialize(const result_row_view& row, bool is_static)
 
 result_set
 result_set::from_raw_result(schema_ptr s, const partition_slice& slice, const result& r) {
-    auto make = [&slice, s = std::move(s)] (bytes_view v) mutable {
-        result_set_builder builder{std::move(s), slice};
-        result_view view(v);
-        view.consume(slice, builder);
-        return builder.build();
-    };
-
-    if (r.buf().is_linearized()) {
-        return make(r.buf().view());
-    } else {
-        // FIXME: make result_view::consume() work on fragments to avoid linearization.
-        bytes_ostream w(r.buf());
-        return make(w.linearize());
-    }
+    result_set_builder builder{std::move(s), slice};
+    result_view::consume(r, slice, builder);
+    return builder.build();
 }
+
+result_set::result_set(const mutation& m) : result_set([&m] {
+    auto slice = partition_slice_builder(*m.schema()).build();
+    auto qr = mutation(m).query(slice, result_request::only_result);
+    return result_set::from_raw_result(m.schema(), slice, qr);
+}())
+{ }
 
 }

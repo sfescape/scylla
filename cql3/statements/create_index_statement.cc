@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -40,102 +40,115 @@
  */
 
 #include "create_index_statement.hh"
+#include "prepared_statement.hh"
 #include "validation.hh"
 #include "service/storage_proxy.hh"
 #include "service/migration_manager.hh"
+#include "service/storage_service.hh"
 #include "schema.hh"
 #include "schema_builder.hh"
+#include "request_validations.hh"
 
-cql3::statements::create_index_statement::create_index_statement(
-        ::shared_ptr<cf_name> name, ::shared_ptr<index_name> index_name,
-        ::shared_ptr<index_target::raw> raw_target,
-        ::shared_ptr<index_prop_defs> properties, bool if_not_exists)
-        : schema_altering_statement(name), _index_name(index_name->get_idx()), _raw_target(
-                raw_target), _properties(properties), _if_not_exists(
-                if_not_exists) {
-}
+#include <boost/range/adaptor/transformed.hpp>
+#include <boost/algorithm/string/join.hpp>
 
-void
-cql3::statements::create_index_statement::check_access(const service::client_state& state) {
-    warn(unimplemented::cause::MIGRATIONS);
-    // TODO
-    //state.hasColumnFamilyAccess(keyspace(), columnFamily(), Permission.ALTER);
-}
+namespace cql3 {
 
-void
-cql3::statements::create_index_statement::validate(distributed<service::storage_proxy>& proxy
-        , const service::client_state& state)
+namespace statements {
+
+create_index_statement::create_index_statement(::shared_ptr<cf_name> name,
+                                               ::shared_ptr<index_name> index_name,
+                                               std::vector<::shared_ptr<index_target::raw>> raw_targets,
+                                               ::shared_ptr<index_prop_defs> properties,
+                                               bool if_not_exists)
+    : schema_altering_statement(name)
+    , _index_name(index_name->get_idx())
+    , _raw_targets(raw_targets)
+    , _properties(properties)
+    , _if_not_exists(if_not_exists)
 {
-    auto schema = validation::validate_column_family(proxy.local().get_db().local(), keyspace(), column_family());
+}
+
+future<>
+create_index_statement::check_access(const service::client_state& state) {
+    return state.has_column_family_access(keyspace(), column_family(), auth::permission::ALTER);
+}
+
+void
+create_index_statement::validate(distributed<service::storage_proxy>& proxy, const service::client_state& state)
+{
+    auto& db = proxy.local().get_db().local();
+    auto schema = validation::validate_column_family(db, keyspace(), column_family());
 
     if (schema->is_counter()) {
         throw exceptions::invalid_request_exception("Secondary indexes are not supported on counter tables");
     }
 
-    // Added since we might as well fail fast if anyone is trying to insert java classes here...
-    if (_properties->is_custom) {
-        throw exceptions::invalid_request_exception("CUSTOM index not supported");
+    if (schema->is_view()) {
+        throw exceptions::invalid_request_exception("Secondary indexes are not supported on materialized views");
     }
 
-    auto target = _raw_target->prepare(schema);
-    auto cd = schema->get_column_definition(target->column->name());
-
-    if (cd == nullptr) {
-        throw exceptions::invalid_request_exception(sprint("No column definition found for column %s", target->column->name()));
+    std::vector<::shared_ptr<index_target>> targets;
+    for (auto& raw_target : _raw_targets) {
+        targets.emplace_back(raw_target->prepare(schema));
     }
 
-    bool is_map = dynamic_cast<const collection_type_impl *>(cd->type.get()) != nullptr
-            && dynamic_cast<const collection_type_impl *>(cd->type.get())->is_map();
-    bool is_frozen_collection = cd->type->is_collection() && !cd->type->is_multi_cell();
+    if (targets.empty() && !_properties->is_custom) {
+        throw exceptions::invalid_request_exception("Only CUSTOM indexes can be created without specifying a target column");
+    }
 
-    if (is_frozen_collection) {
-        if (target->type != index_target::target_type::full) {
+    if (targets.size() > 1) {
+        validate_targets_for_multi_column_index(targets);
+    }
+
+    for (auto& target : targets) {
+        auto cd = schema->get_column_definition(target->column->name());
+
+        if (cd == nullptr) {
             throw exceptions::invalid_request_exception(
-                    sprint("Cannot create index on %s of frozen<map> column %s",
-                            index_target::index_option(target->type),
-                            target->column->name()));
+                    sprint("No column definition found for column %s", *target->column));
         }
-    } else {
-        // validateNotFullIndex
-        if (target->type != index_target::target_type::full) {
-            throw exceptions::invalid_request_exception("full() indexes can only be created on frozen collections");
+
+        if (cd->type->references_duration()) {
+            using request_validations::check_false;
+            const auto& ty = *cd->type;
+
+            check_false(ty.is_collection(), "Secondary indexes are not supported on collections containing durations");
+            check_false(ty.is_tuple(), "Secondary indexes are not supported on tuples containing durations");
+            check_false(ty.is_user_type(), "Secondary indexes are not supported on UDTs containing durations");
+
+            // We're a duration.
+            throw exceptions::invalid_request_exception("Secondary indexes are not supported on duration columns");
         }
-        // validateIsValuesIndexIfTargetColumnNotCollection
-        if (!cd->type->is_collection()
-                && target->type != index_target::target_type::values) {
+
+        // Origin TODO: we could lift that limitation
+        if ((schema->is_dense() || !schema->thrift().has_compound_comparator()) &&
+            cd->kind != column_kind::regular_column) {
             throw exceptions::invalid_request_exception(
-                    sprint(
-                            "Cannot create index on %s of column %s; only non-frozen collections support %s indexes",
-                            index_target::index_option(target->type),
-                            target->column->name(),
-                            index_target::index_option(target->type)));
+                    "Secondary indexes are not supported on PRIMARY KEY columns in COMPACT STORAGE tables");
         }
-        // validateTargetColumnIsMapIfIndexInvolvesKeys
-        if (target->type == index_target::target_type::keys
-                || target->type == index_target::target_type::keys_and_values) {
-            if (!is_map) {
-                throw exceptions::invalid_request_exception(
-                        sprint(
-                                "Cannot create index on %s of column %s with non-map type",
-                                index_target::index_option(target->type),
-                                target->column->name()));
 
-            }
-        }
-    }
-
-    if (cd->idx_info.index_type != ::index_type::none) {
-        auto prev_type = index_target::from_column_definition(*cd);
-        if (is_map && target->type != prev_type) {
+        if (cd->kind == column_kind::partition_key && cd->is_on_all_components()) {
             throw exceptions::invalid_request_exception(
                     sprint(
-                            "Cannot create index on %s(%s): an index on %s(%s) already exists and indexing "
-                                    "a map on more than one dimension at the same time is not currently supported",
-                            index_target::index_option(target->type),
-                            target->column->name(),
-                            index_target::index_option(prev_type),
-                            target->column->name()));
+                            "Cannot create secondary index on partition key column %s",
+                            *target->column));
         }
+
+        bool is_map = dynamic_cast<const collection_type_impl *>(cd->type.get()) != nullptr
+                      && dynamic_cast<const collection_type_impl *>(cd->type.get())->is_map();
+        bool is_frozen_collection = cd->type->is_collection() && !cd->type->is_multi_cell();
+
+        if (is_frozen_collection) {
+            validate_for_frozen_collection(target);
+        } else {
+            validate_not_full_index(target);
+            validate_is_values_index_if_target_column_not_collection(cd, target);
+            validate_target_column_is_map_if_index_involves_keys(is_map, target);
+        }
+    }
+
+    if (db.existing_index_names(keyspace()).count(_index_name) > 0) {
         if (_if_not_exists) {
             return;
         } else {
@@ -144,66 +157,134 @@ cql3::statements::create_index_statement::validate(distributed<service::storage_
     }
 
     _properties->validate();
+}
 
-
-    // Origin TODO: we could lift that limitation
-    if ((schema->is_dense() || !schema->thrift().has_compound_comparator()) && cd->kind != column_kind::regular_column) {
-        throw exceptions::invalid_request_exception("Secondary indexes are not supported on PRIMARY KEY columns in COMPACT STORAGE tables");
-    }
-
-    // It would be possible to support 2ndary index on static columns (but not without modifications of at least ExtendedFilter and
-    // CompositesIndex) and maybe we should, but that means a query like:
-    //     SELECT * FROM foo WHERE static_column = 'bar'
-    // would pull the full partition every time the static column of partition is 'bar', which sounds like offering a
-    // fair potential for foot-shooting, so I prefer leaving that to a follow up ticket once we have identified cases where
-    // such indexing is actually useful.
-    if (cd->is_static()) {
-        throw exceptions::invalid_request_exception("Secondary indexes are not allowed on static columns");
-    }
-    if (cd->kind == column_kind::partition_key && cd->is_on_all_components()) {
+void create_index_statement::validate_for_frozen_collection(::shared_ptr<index_target> target) const
+{
+    if (target->type != index_target::target_type::full) {
         throw exceptions::invalid_request_exception(
-                sprint(
-                        "Cannot create secondary index on partition key column %s",
-                        target->column->name()));
+                sprint("Cannot create index on %s of frozen<map> column %s",
+                        index_target::index_option(target->type),
+                        *target->column));
     }
 }
 
-future<bool>
-cql3::statements::create_index_statement::announce_migration(distributed<service::storage_proxy>& proxy, bool is_local_only) {
-    auto schema = proxy.local().get_db().local().find_schema(keyspace(), column_family());
-    auto target = _raw_target->prepare(schema);
-
-    schema_builder cfm(schema);
-
-    auto* cd = schema->get_column_definition(target->column->name());
-    index_info idx = cd->idx_info;
-
-    if (idx.index_type != ::index_type::none && _if_not_exists) {
-        return make_ready_future<bool>(false);
+void create_index_statement::validate_not_full_index(::shared_ptr<index_target> target) const
+{
+    if (target->type == index_target::target_type::full) {
+        throw exceptions::invalid_request_exception("full() indexes can only be created on frozen collections");
     }
-    if (_properties->is_custom) {
-        idx.index_type = index_type::custom;
-        idx.index_options = _properties->get_options();
-    } else if (schema->thrift().has_compound_comparator()) {
-        index_options_map options;
+}
 
-        if (cd->type->is_collection() && cd->type->is_multi_cell()) {
-            options[index_target::index_option(target->type)] = "";
+void create_index_statement::validate_is_values_index_if_target_column_not_collection(
+        const column_definition* cd, ::shared_ptr<index_target> target) const
+{
+    if (!cd->type->is_collection()
+            && target->type != index_target::target_type::values) {
+        throw exceptions::invalid_request_exception(
+                sprint("Cannot create index on %s of column %s; only non-frozen collections support %s indexes",
+                       index_target::index_option(target->type),
+                       *target->column,
+                       index_target::index_option(target->type)));
+    }
+}
+
+void create_index_statement::validate_target_column_is_map_if_index_involves_keys(bool is_map, ::shared_ptr<index_target> target) const
+{
+    if (target->type == index_target::target_type::keys
+            || target->type == index_target::target_type::keys_and_values) {
+        if (!is_map) {
+            throw exceptions::invalid_request_exception(
+                    sprint("Cannot create index on %s of column %s with non-map type",
+                           index_target::index_option(target->type), *target->column));
         }
-        idx.index_type = index_type::composites;
-        idx.index_options = options;
-    } else {
-        idx.index_type = index_type::keys;
-        idx.index_options = index_options_map();
     }
+}
 
-    idx.index_name = _index_name;
-    cfm.add_default_index_names(proxy.local().get_db().local());
+void create_index_statement::validate_targets_for_multi_column_index(std::vector<::shared_ptr<index_target>> targets) const
+{
+    if (!_properties->is_custom) {
+        throw exceptions::invalid_request_exception("Only CUSTOM indexes support multiple columns");
+    }
+    std::unordered_set<::shared_ptr<column_identifier>> columns;
+    for (auto& target : targets) {
+        if (columns.count(target->column) > 0) {
+            throw exceptions::invalid_request_exception(sprint("Duplicate column %s in index target list", target->column->name()));
+        }
+        columns.emplace(target->column);
+    }
+}
 
+future<::shared_ptr<cql_transport::event::schema_change>>
+create_index_statement::announce_migration(distributed<service::storage_proxy>& proxy, bool is_local_only) {
+    if (!service::get_local_storage_service().cluster_supports_indexes()) {
+        throw exceptions::invalid_request_exception("Index support is not enabled");
+    }
+    auto& db = proxy.local().get_db().local();
+    auto schema = db.find_schema(keyspace(), column_family());
+    std::vector<::shared_ptr<index_target>> targets;
+    for (auto& raw_target : _raw_targets) {
+        targets.emplace_back(raw_target->prepare(schema));
+    }
+    sstring accepted_name = _index_name;
+    if (accepted_name.empty()) {
+        std::experimental::optional<sstring> index_name_root;
+        if (targets.size() == 1) {
+           index_name_root = targets[0]->column->to_string();
+        }
+        accepted_name = db.get_available_index_name(keyspace(), column_family(), index_name_root);
+    }
+    index_metadata_kind kind;
+    index_options_map index_options;
+    if (_properties->is_custom) {
+        kind = index_metadata_kind::custom;
+        index_options = _properties->get_options();
+    } else {
+        kind = schema->is_compound() ? index_metadata_kind::composites : index_metadata_kind::keys;
+    }
+    auto index = make_index_metadata(schema, targets, accepted_name, kind, index_options);
+    auto existing_index = schema->find_index_noname(index);
+    if (existing_index) {
+        if (_if_not_exists) {
+            return make_ready_future<::shared_ptr<cql_transport::event::schema_change>>(nullptr);
+        } else {
+            throw exceptions::invalid_request_exception(
+                    sprint("Index %s is a duplicate of existing index %s", index.name(), existing_index.value().name()));
+        }
+    }
+    schema_builder builder{schema};
+    builder.with_index(index);
     return service::get_local_migration_manager().announce_column_family_update(
-            cfm.build(), false, is_local_only).then([]() {
-        return make_ready_future<bool>(true);
+            builder.build(), false, {}, is_local_only).then([this]() {
+        using namespace cql_transport;
+        return make_shared<event::schema_change>(
+                event::schema_change::change_type::UPDATED,
+                event::schema_change::target_type::TABLE,
+                keyspace(),
+                column_family());
     });
 }
 
+std::unique_ptr<cql3::statements::prepared_statement>
+create_index_statement::prepare(database& db, cql_stats& stats) {
+    return std::make_unique<prepared_statement>(make_shared<create_index_statement>(*this));
+}
 
+index_metadata create_index_statement::make_index_metadata(schema_ptr schema,
+                                                           const std::vector<::shared_ptr<index_target>>& targets,
+                                                           const sstring& name,
+                                                           index_metadata_kind kind,
+                                                           const index_options_map& options)
+{
+    index_options_map new_options = options;
+    auto target_option = boost::algorithm::join(targets | boost::adaptors::transformed(
+            [schema](const auto &target) -> sstring {
+                return target->as_cql_string(schema);
+            }), ",");
+    new_options.emplace(index_target::target_option_name, target_option);
+    return index_metadata{name, new_options, kind};
+}
+
+}
+
+}

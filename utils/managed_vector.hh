@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -38,7 +38,7 @@ public:
 private:
     struct external {
         managed_vector* _backref;
-        T _data[];
+        T _data[0];
 
         external(external&& other) noexcept : _backref(other._backref) {
             for (unsigned i = 0; i < _backref->size(); i++) {
@@ -47,9 +47,15 @@ private:
             }
             _backref->_data = _data;
         }
+        size_t storage_size() const {
+            return sizeof(*this) + sizeof(T[_backref->_capacity]);
+        }
+        friend size_t size_for_allocation_strategy(const external& obj) {
+            return obj.storage_size();
+        }
     };
     union maybe_constructed {
-        constexpr maybe_constructed() { }
+        maybe_constructed() { }
         ~maybe_constructed() { }
         T object;
     };
@@ -58,6 +64,7 @@ private:
     size_type _size = 0;
     size_type _capacity = InternalSize;
     T* _data = reinterpret_cast<T*>(_internal.data());
+    friend class external;
 private:
     bool is_external() const {
         return _data != reinterpret_cast<const T*>(_internal.data());
@@ -76,7 +83,7 @@ private:
     void clear_and_release() noexcept {
         clear();
         if (is_external()) {
-            current_allocator().free(get_external());
+            current_allocator().free(get_external(), get_external()->storage_size());
         }
     }
 public:
@@ -174,7 +181,7 @@ public:
         if (new_capacity <= _capacity) {
             return;
         }
-        auto ptr = current_allocator().alloc(standard_migrator<external>,
+        auto ptr = current_allocator().alloc(&standard_migrator<external>::object,
             sizeof(external) + sizeof(T) * new_capacity, alignof(external));
         auto ext = static_cast<external*>(ptr);
         ext->_backref = this;
@@ -184,7 +191,7 @@ public:
             _data[i].~T();
         }
         if (is_external()) {
-            current_allocator().free(get_external());
+            current_allocator().free(get_external(), get_external()->storage_size());
         }
         _data = data_ptr;
         _capacity = new_capacity;
@@ -231,5 +238,13 @@ public:
         while (_size < new_size) {
             push_back(value);
         }
+    }
+
+    // Returns the amount of external memory used.
+    size_t external_memory_usage() const {
+        if (is_external()) {
+            return sizeof(external) + _capacity * sizeof(T);
+        }
+        return 0;
     }
 };

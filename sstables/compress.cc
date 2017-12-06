@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -22,8 +22,11 @@
 #include <stdexcept>
 #include <cstdlib>
 
-#include "core/align.hh"
-#include "core/unaligned.hh"
+#include <boost/range/algorithm/find_if.hpp>
+#include <seastar/core/align.hh>
+#include <seastar/core/bitops.hh>
+#include <seastar/core/byteorder.hh>
+#include <seastar/core/fstream.hh>
 
 #include "compress.hh"
 
@@ -32,8 +35,228 @@
 #include <snappy-c.h>
 
 #include "unimplemented.hh"
+#include "stdx.hh"
+#include "segmented_compress_params.hh"
 
 namespace sstables {
+
+extern logging::logger sstlog;
+
+enum class mask_type : uint8_t {
+    set,
+    clear
+};
+
+// size_bits cannot be >= 64
+static inline uint64_t make_mask(uint8_t size_bits, uint8_t offset, mask_type t) noexcept {
+    const uint64_t mask = ((1 << size_bits) - 1) << offset;
+    return t == mask_type::set ? mask : ~mask;
+}
+
+/*
+ * ----> memory addresses
+ *
+ * Little Endian (e.g. x86)
+ *
+ * |1|2|3|4| | | | | CPU integer
+ *  -------
+ *     |
+ *     +-+ << shift = prefix bits
+ *       |
+ *
+ * | |1|2|3|4| | | | raw storage (unaligned)
+ *  = ------- =====
+ *  |           |
+ *  |           +-> suffix bits
+ *  +-> prefix bits
+ *
+ *
+ * Big Endian (e.g. PPC)
+ *
+ * | | | | |4|3|2|1| CPU integer
+ *          -------
+ *             |
+ *       +-----+ << shift = suffix bits
+ *       |
+ *
+ * | |4|3|2|1| | | | raw storage (unaligned)
+ *  = ------- =====
+ *  |           |
+ *  |           +-> suffix bits
+ *  +-> prefix bits
+ *
+ * |0|1|1|1|1|0|0|0| read/write mask
+ */
+struct bit_displacement {
+    uint64_t shift;
+    uint64_t mask;
+};
+
+inline uint64_t displacement_bits(uint64_t prefix_bits, uint8_t size_bits) {
+// Works with gcc and clang
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return prefix_bits;
+#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return 64 - prefix_bits - size_bits;
+#else
+#error "Unsupported platform or compiler, cannot detect endianness"
+#endif
+}
+
+inline bit_displacement displacement_for(uint64_t prefix_bits, uint8_t size_bits, mask_type t) {
+    const uint64_t d = displacement_bits(prefix_bits, size_bits);
+    return {d, make_mask(size_bits, d, t)};
+}
+
+std::pair<bucket_info, segment_info> params_for_chunk_size(uint32_t chunk_size) {
+    const uint8_t chunk_size_log2 = log2ceil(chunk_size);
+
+    auto it = boost::find_if(bucket_infos, [&] (const bucket_info& bi) {
+        return bi.chunk_size_log2 == chunk_size_log2;
+    });
+
+    // This scenario should be so rare that we only fall back to a safe
+    // set of parameters, not optimal ones.
+    if (it == bucket_infos.end()) {
+        const uint8_t data_size = bucket_infos.front().best_data_size_log2;
+        return {{chunk_size_log2, data_size, (8 * bucket_size - 56) / data_size},
+            {chunk_size_log2, data_size, uint8_t(1)}};
+    }
+
+    auto b = *it;
+    auto s = *boost::find_if(segment_infos, [&] (const segment_info& si) {
+        return si.data_size_log2 == b.best_data_size_log2 && si.chunk_size_log2 == b.chunk_size_log2;
+    });
+
+    return {std::move(b), std::move(s)};
+}
+
+uint64_t compression::segmented_offsets::read(uint64_t bucket_index, uint64_t offset_bits, uint64_t size_bits) const {
+    const uint64_t offset_byte = offset_bits / 8;
+
+    uint64_t value{0};
+
+    std::copy_n(_storage[bucket_index].storage.get() + offset_byte, sizeof(value), reinterpret_cast<char*>(&value));
+
+    const auto displacement = displacement_for(offset_bits % 8, size_bits, mask_type::set);
+
+    value &= displacement.mask;
+    value >>= displacement.shift;
+
+    return value;
+}
+
+void compression::segmented_offsets::write(uint64_t bucket_index, uint64_t offset_bits, uint64_t size_bits, uint64_t value) {
+    const uint64_t offset_byte = offset_bits / 8;
+
+    uint64_t old_value{0};
+
+    std::copy_n(_storage[bucket_index].storage.get() + offset_byte, sizeof(old_value), reinterpret_cast<char*>(&old_value));
+
+    const auto displacement = displacement_for(offset_bits % 8, size_bits, mask_type::clear);
+
+    value <<= displacement.shift;
+
+    if ((~displacement.mask | value) != ~displacement.mask) {
+        throw std::invalid_argument(sprint("{}: to-be-written value would overflow the allocated bits", __FUNCTION__));
+    }
+
+    old_value &= displacement.mask;
+    value |= old_value;
+
+    std::copy_n(reinterpret_cast<char*>(&value), sizeof(value), _storage[bucket_index].storage.get() + offset_byte);
+}
+
+void compression::segmented_offsets::update_position_trackers(std::size_t index) const {
+    if (_current_index != index - 1) {
+        _current_index = index;
+        const uint64_t current_segment_index = _current_index / _grouped_offsets;
+        _current_bucket_segment_index = current_segment_index % _segments_per_bucket;
+        _current_segment_relative_index = _current_index % _grouped_offsets;
+        _current_bucket_index = current_segment_index / _segments_per_bucket;
+        _current_segment_offset_bits = (_current_bucket_segment_index % _segments_per_bucket) * _segment_size_bits;
+    } else {
+        ++_current_index;
+        ++_current_segment_relative_index;
+
+        // Crossed segment boundary.
+        if (_current_segment_relative_index == _grouped_offsets) {
+            ++_current_bucket_segment_index;
+            _current_segment_relative_index = 0;
+
+            // Crossed bucket boundary.
+            if (_current_bucket_segment_index == _segments_per_bucket) {
+                ++_current_bucket_index;
+                _current_bucket_segment_index = 0;
+                _current_segment_offset_bits = 0;
+            } else {
+                _current_segment_offset_bits += _segment_size_bits;
+            }
+        }
+    }
+}
+
+void compression::segmented_offsets::init(uint32_t chunk_size) {
+    assert(chunk_size != 0);
+
+    _chunk_size = chunk_size;
+
+    const auto params = params_for_chunk_size(chunk_size);
+
+    sstlog.trace(
+            "{} {}(): chunk size {} (log2)",
+            this,
+            __FUNCTION__,
+            static_cast<int>(params.first.chunk_size_log2));
+
+    _grouped_offsets = params.second.grouped_offsets;
+    _segment_base_offset_size_bits = params.second.data_size_log2;
+    _segmented_offset_size_bits = static_cast<uint64_t>(log2ceil((_chunk_size + 64) * (_grouped_offsets - 1)));
+    _segment_size_bits = _segment_base_offset_size_bits + (_grouped_offsets - 1) * _segmented_offset_size_bits;
+    _segments_per_bucket = params.first.segments_per_bucket;
+}
+
+uint64_t compression::segmented_offsets::at(std::size_t i) const {
+    if (i >= _size) {
+        throw std::out_of_range(sprint("{}: index {} is out of range", __FUNCTION__, i));
+    }
+
+    update_position_trackers(i);
+
+    const uint64_t bucket_base_offset = _storage[_current_bucket_index].base_offset;
+    const uint64_t segment_base_offset = bucket_base_offset + read(_current_bucket_index, _current_segment_offset_bits, _segment_base_offset_size_bits);
+
+    if (_current_segment_relative_index == 0) {
+        return  segment_base_offset;
+    }
+
+    return segment_base_offset
+        + read(_current_bucket_index,
+                _current_segment_offset_bits + _segment_base_offset_size_bits + (_current_segment_relative_index - 1) * _segmented_offset_size_bits,
+                _segmented_offset_size_bits);
+}
+
+void compression::segmented_offsets::push_back(uint64_t offset) {
+    update_position_trackers(_size);
+
+    if (_current_bucket_index == _storage.size()) {
+        _storage.push_back(bucket{_last_written_offset, std::unique_ptr<char[]>(new char[bucket_size])});
+    }
+
+    const uint64_t bucket_base_offset = _storage[_current_bucket_index].base_offset;
+
+    if (_current_segment_relative_index == 0) {
+        write(_current_bucket_index, _current_segment_offset_bits, _segment_base_offset_size_bits, offset - bucket_base_offset);
+    } else {
+        const uint64_t segment_base_offset = bucket_base_offset + read(_current_bucket_index, _current_segment_offset_bits, _segment_base_offset_size_bits);
+        write(_current_bucket_index,
+                _current_segment_offset_bits + _segment_base_offset_size_bits + (_current_segment_relative_index - 1) * _segmented_offset_size_bits,
+                _segmented_offset_size_bits,
+                offset - segment_base_offset);
+    }
+    _last_written_offset = offset;
+    ++_size;
+}
 
 void compression::update(uint64_t compressed_file_length) {
     // FIXME: also process _compression.options (just for crc-check frequency)
@@ -68,15 +291,21 @@ void compression::set_compressor(compressor c) {
      }
 }
 
+// locate() takes a byte position in the uncompressed stream, and finds the
+// the location of the compressed chunk on disk which contains it, and the
+// offset in this chunk.
+// locate() may only be used for offsets of actual bytes, and in particular
+// the end-of-file position (one past the last byte) MUST not be used. If the
+// caller wants to read from the end of file, it should simply read nothing.
 compression::chunk_and_offset
 compression::locate(uint64_t position) const {
     auto ucl = uncompressed_chunk_length();
     auto chunk_index = position / ucl;
     decltype(ucl) chunk_offset = position % ucl;
-    auto chunk_start = offsets.elements.at(chunk_index);
-    auto chunk_end = (chunk_index + 1 == offsets.elements.size())
+    auto chunk_start = offsets.at(chunk_index);
+    auto chunk_end = (chunk_index + 1 == offsets.size())
             ? _compressed_file_length
-            : offsets.elements.at(chunk_index + 1);
+            : offsets.at(chunk_index + 1);
     return { chunk_start, chunk_end - chunk_start, chunk_offset };
 }
 
@@ -118,7 +347,11 @@ size_t compress_lz4(const char* input, size_t input_len,
     output[1] = (input_len >> 8) & 0xFF;
     output[2] = (input_len >> 16) & 0xFF;
     output[3] = (input_len >> 24) & 0xFF;
+#ifdef HAVE_LZ4_COMPRESS_DEFAULT
+    auto ret = LZ4_compress_default(input, output + 4, input_len, LZ4_compressBound(input_len));
+#else
     auto ret = LZ4_compress(input, output + 4, input_len);
+#endif
     if (ret == 0) {
         throw std::runtime_error("LZ4 compression failure: LZ4_compress() failed");
     }
@@ -180,7 +413,7 @@ size_t uncompress_snappy(const char* input, size_t input_len,
             == SNAPPY_OK) {
         return output_len;
     } else {
-        throw std::runtime_error("deflate uncompression failure");
+        throw std::runtime_error("snappy uncompression failure");
     }
 }
 
@@ -217,29 +450,61 @@ size_t compress_max_size_snappy(size_t input_len) {
 }
 
 class compressed_file_data_source_impl : public data_source_impl {
-    file _file;
+    stdx::optional<input_stream<char>> _input_stream;
     sstables::compression* _compression_metadata;
-    uint64_t _pos = 0;
+    uint64_t _underlying_pos;
+    uint64_t _pos;
+    uint64_t _beg_pos;
+    uint64_t _end_pos;
 public:
-    compressed_file_data_source_impl(file f,
-            sstables::compression* cm, uint64_t pos)
-            : _file(std::move(f)), _compression_metadata(cm),
-              _pos(pos)
-            {}
+    compressed_file_data_source_impl(file f, sstables::compression* cm,
+                uint64_t pos, size_t len, file_input_stream_options options)
+            : _compression_metadata(cm)
+    {
+        _beg_pos = pos;
+        if (pos > _compression_metadata->uncompressed_file_length()) {
+            throw std::runtime_error("attempt to uncompress beyond end");
+        }
+        if (len == 0 || pos == _compression_metadata->uncompressed_file_length()) {
+            // Nothing to read
+            _end_pos = _pos = _beg_pos;
+            return;
+        }
+        if (len <= _compression_metadata->uncompressed_file_length() - pos) {
+            _end_pos = pos + len;
+        } else {
+            _end_pos = _compression_metadata->uncompressed_file_length();
+        }
+        // _beg_pos and _end_pos specify positions in the compressed stream.
+        // We need to translate them into a range of uncompressed chunks,
+        // and open a file_input_stream to read that range.
+        auto start = _compression_metadata->locate(_beg_pos);
+        auto end = _compression_metadata->locate(_end_pos - 1);
+        _input_stream = make_file_input_stream(std::move(f),
+                start.chunk_start,
+                end.chunk_start + end.chunk_len - start.chunk_start,
+                std::move(options));
+        _underlying_pos = start.chunk_start;
+        _pos = _beg_pos;
+    }
     virtual future<temporary_buffer<char>> get() override {
-        if (_pos >= _compression_metadata->data_len) {
+        if (_pos >= _end_pos) {
             return make_ready_future<temporary_buffer<char>>();
         }
         auto addr = _compression_metadata->locate(_pos);
-        return _file.dma_read_exactly<char>(addr.chunk_start, addr.chunk_len).
+        // Uncompress the next chunk. We need to skip part of the first
+        // chunk, but then continue to read from beginning of chunks.
+        if (_pos != _beg_pos && addr.offset != 0) {
+            throw std::runtime_error("compressed reader out of sync");
+        }
+        return _input_stream->read_exactly(addr.chunk_len).
             then([this, addr](temporary_buffer<char> buf) {
                 // The last 4 bytes of the chunk are the adler32 checksum
                 // of the rest of the (compressed) chunk.
                 auto compressed_len = addr.chunk_len - 4;
                 // FIXME: Do not always calculate checksum - Cassandra has a
                 // probability (defaulting to 1.0, but still...)
-                uint32_t checksum = ntohl(*unaligned_cast<const uint32_t *>(
-                        buf.get() + compressed_len));
+                auto checksum = read_be<uint32_t>(buf.get() + compressed_len);
                 if (checksum != checksum_adler32(buf.get(), compressed_len)) {
                     throw std::runtime_error("compressed chunk failed checksum");
                 }
@@ -256,23 +521,47 @@ public:
                 out.trim(len);
                 out.trim_front(addr.offset);
                 _pos += out.size();
+                _underlying_pos += addr.chunk_len;
                 return out;
+        });
+    }
+
+    virtual future<> close() override {
+        if (!_input_stream) {
+            return make_ready_future<>();
+        }
+        return _input_stream->close();
+    }
+
+    virtual future<temporary_buffer<char>> skip(uint64_t n) override {
+        _pos += n;
+        assert(_pos <= _end_pos);
+        if (_pos == _end_pos) {
+            return make_ready_future<temporary_buffer<char>>();
+        }
+        auto addr = _compression_metadata->locate(_pos);
+        auto underlying_n = addr.chunk_start - _underlying_pos;
+        _underlying_pos = addr.chunk_start;
+        _beg_pos = _pos;
+        return _input_stream->skip(underlying_n).then([] {
+            return make_ready_future<temporary_buffer<char>>();
         });
     }
 };
 
 class compressed_file_data_source : public data_source {
 public:
-    compressed_file_data_source(file f,
-            sstables::compression* cm, uint64_t offset)
+    compressed_file_data_source(file f, sstables::compression* cm,
+            uint64_t offset, size_t len, file_input_stream_options options)
         : data_source(std::make_unique<compressed_file_data_source_impl>(
-                std::move(f), cm, offset))
+                std::move(f), cm, offset, len, std::move(options)))
         {}
 };
 
 input_stream<char> make_compressed_file_input_stream(
-        file f, sstables::compression* cm, uint64_t offset)
+        file f, sstables::compression* cm, uint64_t offset, size_t len,
+        file_input_stream_options options)
 {
     return input_stream<char>(compressed_file_data_source(
-            std::move(f), cm, offset));
+            std::move(f), cm, offset, len, std::move(options)));
 }

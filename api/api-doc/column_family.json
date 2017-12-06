@@ -78,11 +78,19 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
                      "paramType":"path"
+                  },
+                  {
+                     "name":"split_output",
+                     "description":"true if the output of the major compaction should be split in several sstables",
+                     "required":false,
+                     "allowMultiple":false,
+                     "type":"bool",
+                     "paramType":"query"
                   }
                ]
             }
@@ -102,7 +110,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -129,7 +137,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -153,7 +161,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -180,7 +188,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -204,7 +212,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -244,7 +252,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -271,7 +279,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -298,7 +306,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -317,7 +325,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -349,7 +357,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -381,7 +389,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -405,7 +413,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -432,7 +440,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -459,7 +467,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -491,7 +499,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -518,7 +526,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -545,7 +553,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -569,31 +577,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
-                     "required":true,
-                     "allowMultiple":false,
-                     "type":"string",
-                     "paramType":"path"
-                  }
-               ]
-            }
-         ]
-      },
-      {
-         "path":"/column_family/sstables/snapshots_size/{name}",
-         "operations":[
-            {
-               "method":"GET",
-               "summary":"the size of SSTables in 'snapshots' subdirectory which aren't live anymore",
-               "type":"double",
-               "nickname":"true_snapshots_size",
-               "produces":[
-                  "application/json"
-               ],
-               "parameters":[
-                  {
-                     "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -617,7 +601,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -657,7 +641,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -697,7 +681,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -737,7 +721,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -777,7 +761,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -817,7 +801,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -857,7 +841,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -897,7 +881,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -940,7 +924,34 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"path"
+                  }
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/column_family/metrics/estimated_row_count/{name}",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get estimated row count",
+               "type":"array",
+               "items":{
+                  "type":"long"
+               },
+               "nickname":"get_estimated_row_count",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+                  {
+                     "name":"name",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -967,7 +978,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -991,7 +1002,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1031,7 +1042,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1055,7 +1066,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1091,14 +1102,14 @@
                "method":"GET",
                "summary":"Get read latency histogram",
                "$ref": "#/utils/histogram",
-               "nickname":"get_read_latency_histogram",
+               "nickname":"get_read_latency_histogram_depricated",
                "produces":[
                   "application/json"
                ],
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1117,6 +1128,49 @@
                "type":"array",
                "items":{
                   "$ref": "#/utils/histogram"
+               },
+               "nickname":"get_all_read_latency_histogram_depricated",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/column_family/metrics/read_latency/moving_average_histogram/{name}",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get read latency moving avrage histogram",
+               "$ref": "#/utils/rate_moving_average_and_histogram",
+               "nickname":"get_read_latency_histogram",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+                  {
+                     "name":"name",
+                     "description":"The column family name in keyspace:name format",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"path"
+                  }
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/column_family/metrics/read_latency/moving_average_histogram/",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get read latency moving avrage histogram from all column family",
+               "type":"array",
+               "items":{
+                  "$ref": "#/utils/rate_moving_average_and_histogram"
                },
                "nickname":"get_all_read_latency_histogram",
                "produces":[
@@ -1157,7 +1211,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1197,7 +1251,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1221,7 +1275,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1257,14 +1311,14 @@
                "method":"GET",
                "summary":"Get write latency histogram",
                "$ref": "#/utils/histogram",
-               "nickname":"get_write_latency_histogram",
+               "nickname":"get_write_latency_histogram_depricated",
                "produces":[
                   "application/json"
                ],
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1283,6 +1337,49 @@
                "type":"array",
                "items":{
                   "$ref": "#/utils/histogram"
+               },
+               "nickname":"get_all_write_latency_histogram_depricated",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/column_family/metrics/write_latency/moving_average_histogram/{name}",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get write latency moving average histogram",
+               "$ref": "#/utils/rate_moving_average_and_histogram",
+               "nickname":"get_write_latency_histogram",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+                  {
+                     "name":"name",
+                     "description":"The column family name in keyspace:name format",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"path"
+                  }
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/column_family/metrics/write_latency/moving_average_histogram/",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get write latency moving average histogram of all column family",
+               "type":"array",
+               "items":{
+                  "$ref": "#/utils/rate_moving_average_and_histogram"
                },
                "nickname":"get_all_write_latency_histogram",
                "produces":[
@@ -1323,7 +1420,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1363,7 +1460,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1403,7 +1500,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1443,7 +1540,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1483,7 +1580,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1523,7 +1620,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1563,7 +1660,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1603,7 +1700,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1643,7 +1740,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1683,7 +1780,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1723,7 +1820,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1763,7 +1860,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1803,7 +1900,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1843,7 +1940,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1883,7 +1980,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1923,7 +2020,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -1963,7 +2060,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2003,7 +2100,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2014,7 +2111,7 @@
          ]
       },
       {
-         "path":"/column_family/metrics/true_snapshots_size/{name}",
+         "path":"/column_family/metrics/snapshots_size/{name}",
          "operations":[
             {
                "method":"GET",
@@ -2027,7 +2124,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2067,7 +2164,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2107,7 +2204,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2147,7 +2244,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2187,7 +2284,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2211,7 +2308,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2235,7 +2332,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2262,7 +2359,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2289,7 +2386,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2316,7 +2413,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2343,7 +2440,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2412,7 +2509,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2436,7 +2533,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2460,7 +2557,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2484,7 +2581,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2508,7 +2605,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2532,7 +2629,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2556,7 +2653,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2580,7 +2677,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2604,7 +2701,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2628,7 +2725,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2652,7 +2749,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",
@@ -2676,7 +2773,7 @@
                "parameters":[
                   {
                      "name":"name",
-                     "description":"The column family name in keysspace:name format",
+                     "description":"The column family name in keyspace:name format",
                      "required":true,
                      "allowMultiple":false,
                      "type":"string",

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -42,7 +42,8 @@
 #pragma once
 
 #include "cql3/restrictions/restriction.hh"
-#include "cql3/statements/cf_statement.hh"
+#include "cql3/statements/raw/cf_statement.hh"
+#include "cql3/statements/bound.hh"
 #include "cql3/column_identifier.hh"
 #include "cql3/update_parameters.hh"
 #include "cql3/column_condition.hh"
@@ -50,6 +51,9 @@
 #include "cql3/attributes.hh"
 #include "cql3/operation.hh"
 #include "cql3/relation.hh"
+#include "cql3/restrictions/statement_restrictions.hh"
+#include "cql3/single_column_relation.hh"
+#include "cql3/statements/statement_type.hh"
 
 #include "db/consistency_level.hh"
 
@@ -61,21 +65,23 @@
 #include "service/storage_proxy.hh"
 
 #include <memory>
+#include <experimental/optional>
 
 namespace cql3 {
 
 namespace statements {
 
+
+namespace raw { class modification_statement; }
+
 /*
  * Abstract parent class of individual modifications, i.e. INSERT, UPDATE and DELETE.
  */
-class modification_statement : public cql_statement {
+class modification_statement : public cql_statement_no_metadata {
 private:
     static thread_local const ::shared_ptr<column_identifier> CAS_RESULT_COLUMN;
 
 public:
-    enum class statement_type { INSERT, UPDATE, DELETE };
-
     const statement_type type;
 
 private:
@@ -86,7 +92,6 @@ public:
     const std::unique_ptr<attributes> attrs;
 
 protected:
-    std::unordered_map<const column_definition*, ::shared_ptr<restrictions::restriction>> _processed_keys;
     std::vector<::shared_ptr<operation>> _column_operations;
 private:
     // Separating normal and static conditions makes things somewhat easier
@@ -96,106 +101,55 @@ private:
     bool _if_not_exists = false;
     bool _if_exists = false;
 
-    bool _has_no_clustering_columns = true;
-
     bool _sets_static_columns = false;
     bool _sets_regular_columns = false;
+    bool _sets_a_collection = false;
+    std::experimental::optional<bool> _is_raw_counter_shard_write;
 
     const std::function<const column_definition&(::shared_ptr<column_condition>)> get_column_for_condition =
         [](::shared_ptr<column_condition> cond) -> const column_definition& {
             return cond->column;
         };
 
-public:
-    modification_statement(statement_type type_, uint32_t bound_terms, schema_ptr schema_, std::unique_ptr<attributes> attrs_)
-        : type{type_}
-        , _bound_terms{bound_terms}
-        , s{schema_}
-        , attrs{std::move(attrs_)}
-        , _column_operations{}
-    { }
+    uint64_t* _cql_modification_counter_ptr = nullptr;
 
-    virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override {
-        if (attrs->uses_function(ks_name, function_name)) {
-            return true;
-        }
-        for (auto&& e : _processed_keys) {
-            auto r = e.second;
-            if (r && r->uses_function(ks_name, function_name)) {
-                return true;
-            }
-        }
-        for (auto&& operation : _column_operations) {
-            if (operation && operation->uses_function(ks_name, function_name)) {
-                return true;
-            }
-        }
-        for (auto&& condition : _column_conditions) {
-            if (condition && condition->uses_function(ks_name, function_name)) {
-                return true;
-            }
-        }
-        for (auto&& condition : _static_conditions) {
-            if (condition && condition->uses_function(ks_name, function_name)) {
-                return true;
-            }
-        }
-        return false;
-    }
+    ::shared_ptr<restrictions::statement_restrictions> _restrictions;
+public:
+    modification_statement(statement_type type_, uint32_t bound_terms, schema_ptr schema_, std::unique_ptr<attributes> attrs_, uint64_t* cql_stats_counter_ptr);
+
+    virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override;
 
     virtual bool require_full_clustering_key() const = 0;
 
-    virtual void add_update_for_key(mutation& m, const exploded_clustering_prefix& prefix, const update_parameters& params) = 0;
+    virtual bool allow_clustering_key_slices() const = 0;
 
-    virtual uint32_t get_bound_terms() override {
-        return _bound_terms;
-    }
+    virtual void add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params) = 0;
 
-    virtual sstring keyspace() const {
-        return s->ks_name();
-    }
+    virtual uint32_t get_bound_terms() override;
 
-    virtual sstring column_family() const {
-        return s->cf_name();
-    }
+    virtual const sstring& keyspace() const;
 
-    virtual bool is_counter() const {
-        return s->is_counter();
-    }
+    virtual const sstring& column_family() const;
 
-    int64_t get_timestamp(int64_t now, const query_options& options) const {
-        return attrs->get_timestamp(now, options);
-    }
+    virtual bool is_counter() const;
 
-    bool is_timestamp_set() const {
-        return attrs->is_timestamp_set();
-    }
+    virtual bool is_view() const;
 
-    gc_clock::duration get_time_to_live(const query_options& options) const {
-        return gc_clock::duration(attrs->get_time_to_live(options));
-    }
+    int64_t get_timestamp(int64_t now, const query_options& options) const;
 
-    virtual void check_access(const service::client_state& state) override {
-        warn(unimplemented::cause::PERMISSIONS);
-#if 0
-        state.hasColumnFamilyAccess(keyspace(), columnFamily(), Permission.MODIFY);
+    bool is_timestamp_set() const;
 
-        // CAS updates can be used to simulate a SELECT query, so should require Permission.SELECT as well.
-        if (hasConditions())
-            state.hasColumnFamilyAccess(keyspace(), columnFamily(), Permission.SELECT);
-#endif
-    }
+    gc_clock::duration get_time_to_live(const query_options& options) const;
+
+    virtual future<> check_access(const service::client_state& state) override;
 
     void validate(distributed<service::storage_proxy>&, const service::client_state& state) override;
 
-    void add_operation(::shared_ptr<operation> op) {
-        if (op->column.is_static()) {
-            _sets_static_columns = true;
-        } else {
-            _sets_regular_columns = true;
-        }
-        _column_operations.push_back(std::move(op));
-    }
+    virtual bool depends_on_keyspace(const sstring& ks_name) const override;
+
+    virtual bool depends_on_column_family(const sstring& cf_name) const override;
+
+    void add_operation(::shared_ptr<operation> op);
 
 #if 0
     public Iterable<ColumnDefinition> getColumnsWithConditions()
@@ -207,79 +161,67 @@ public:
                                 staticConditions == null ? Collections.<ColumnDefinition>emptyList() : Iterables.transform(staticConditions, getColumnForCondition));
     }
 #endif
+
+    void inc_cql_stats() {
+        ++(*_cql_modification_counter_ptr);
+    }
+
+    const ::shared_ptr<restrictions::statement_restrictions>& restrictions() const {
+        return _restrictions;
+    }
 public:
-    void add_condition(::shared_ptr<column_condition> cond) {
-        if (cond->column.is_static()) {
-            _sets_static_columns = true;
-            _static_conditions.emplace_back(std::move(cond));
-        } else {
-            _sets_regular_columns = true;
-            _column_conditions.emplace_back(std::move(cond));
-        }
+    void add_condition(::shared_ptr<column_condition> cond);
+
+    void set_if_not_exist_condition();
+
+    bool has_if_not_exist_condition() const;
+
+    void set_if_exist_condition();
+
+    bool has_if_exist_condition() const;
+
+    bool is_raw_counter_shard_write() const {
+        return _is_raw_counter_shard_write.value_or(false);
     }
 
-    void set_if_not_exist_condition() {
-        _if_not_exists = true;
-    }
-
-    bool has_if_not_exist_condition() const {
-        return _if_not_exists;
-    }
-
-    void set_if_exist_condition() {
-        _if_exists = true;
-    }
-
-    bool has_if_exist_condition() const {
-        return _if_exists;
-    }
-
-private:
-    void add_key_values(const column_definition& def, ::shared_ptr<restrictions::restriction> values);
-
-public:
-    void add_key_value(const column_definition& def, ::shared_ptr<term> value);
     void process_where_clause(database& db, std::vector<relation_ptr> where_clause, ::shared_ptr<variable_specifications> names);
-    std::vector<partition_key> build_partition_keys(const query_options& options);
 
 private:
-    exploded_clustering_prefix create_exploded_clustering_prefix(const query_options& options);
-    exploded_clustering_prefix create_exploded_clustering_prefix_internal(const query_options& options);
+    dht::partition_range_vector build_partition_keys(const query_options& options);
+    query::clustering_row_ranges create_clustering_ranges(const query_options& options);
 
-protected:
-    const column_definition* get_first_empty_key();
-
-public:
-    bool requires_read() {
-        return std::any_of(_column_operations.begin(), _column_operations.end(), [] (auto&& op) {
-            return op->requires_read();
-        });
+    bool applies_only_to_static_columns() const {
+        return _sets_static_columns && !_sets_regular_columns;
     }
+public:
+    bool requires_read();
 
 protected:
     future<update_parameters::prefetched_rows_type> read_required_rows(
                 distributed<service::storage_proxy>& proxy,
-                lw_shared_ptr<std::vector<partition_key>> keys,
-                lw_shared_ptr<exploded_clustering_prefix> prefix,
+                dht::partition_range_vector keys,
+                lw_shared_ptr<query::clustering_row_ranges> ranges,
                 bool local,
-                db::consistency_level cl);
-
+                db::consistency_level cl,
+                tracing::trace_state_ptr trace_state);
+private:
+    future<::shared_ptr<cql_transport::messages::result_message>>
+    do_execute(distributed<service::storage_proxy>& proxy, service::query_state& qs, const query_options& options);
+    friend class modification_statement_executor;
 public:
-    bool has_conditions() {
-        return _if_not_exists || _if_exists || !_column_conditions.empty() || !_static_conditions.empty();
-    }
+    bool has_conditions();
 
-    virtual future<::shared_ptr<transport::messages::result_message>>
+    virtual future<::shared_ptr<cql_transport::messages::result_message>>
     execute(distributed<service::storage_proxy>& proxy, service::query_state& qs, const query_options& options) override;
 
-    virtual future<::shared_ptr<transport::messages::result_message>>
+    virtual future<::shared_ptr<cql_transport::messages::result_message>>
     execute_internal(distributed<service::storage_proxy>& proxy, service::query_state& qs, const query_options& options) override;
 
 private:
     future<>
     execute_without_condition(distributed<service::storage_proxy>& proxy, service::query_state& qs, const query_options& options);
 
-    future<::shared_ptr<transport::messages::result_message>>
+    future<::shared_ptr<cql_transport::messages::result_message>>
     execute_with_condition(distributed<service::storage_proxy>& proxy, service::query_state& qs, const query_options& options);
 
 #if 0
@@ -407,16 +349,17 @@ public:
      * @return vector of the mutations
      * @throws invalid_request_exception on invalid requests
      */
-    future<std::vector<mutation>> get_mutations(distributed<service::storage_proxy>& proxy, const query_options& options, bool local, int64_t now);
+    future<std::vector<mutation>> get_mutations(distributed<service::storage_proxy>& proxy, const query_options& options, bool local, int64_t now, tracing::trace_state_ptr trace_state);
 
 public:
     future<std::unique_ptr<update_parameters>> make_update_parameters(
                 distributed<service::storage_proxy>& proxy,
-                lw_shared_ptr<std::vector<partition_key>> keys,
-                lw_shared_ptr<exploded_clustering_prefix> prefix,
+                lw_shared_ptr<dht::partition_range_vector> keys,
+                lw_shared_ptr<query::clustering_row_ranges> ranges,
                 const query_options& options,
                 bool local,
-                int64_t now);
+                int64_t now,
+                tracing::trace_state_ptr trace_state);
 
 protected:
     /**
@@ -424,39 +367,9 @@ protected:
      * processed to check that they are compatible.
      * @throws InvalidRequestException
      */
-    virtual void validate_where_clause_for_conditions() {
-        //  no-op by default
-    }
-
-public:
-    class parsed : public cf_statement {
-    public:
-        using conditions_vector = std::vector<std::pair<::shared_ptr<column_identifier::raw>, ::shared_ptr<column_condition::raw>>>;
-    protected:
-        const ::shared_ptr<attributes::raw> _attrs;
-        const std::vector<std::pair<::shared_ptr<column_identifier::raw>, ::shared_ptr<column_condition::raw>>> _conditions;
-    private:
-        const bool _if_not_exists;
-        const bool _if_exists;
-    protected:
-        parsed(::shared_ptr<cf_name> name, ::shared_ptr<attributes::raw> attrs, conditions_vector conditions, bool if_not_exists, bool if_exists)
-            : cf_statement{std::move(name)}
-            , _attrs{std::move(attrs)}
-            , _conditions{std::move(conditions)}
-            , _if_not_exists{if_not_exists}
-            , _if_exists{if_exists}
-        { }
-
-    public:
-        virtual ::shared_ptr<parsed_statement::prepared> prepare(database& db) override;
-        ::shared_ptr<modification_statement> prepare(database& db, ::shared_ptr<variable_specifications> bound_names);;
-    protected:
-        virtual ::shared_ptr<modification_statement> prepare_internal(database& db, schema_ptr schema,
-            ::shared_ptr<variable_specifications> bound_names, std::unique_ptr<attributes> attrs) = 0;
-    };
+    virtual void validate_where_clause_for_conditions();
+    friend class raw::modification_statement;
 };
-
-std::ostream& operator<<(std::ostream& out, modification_statement::statement_type t);
 
 }
 

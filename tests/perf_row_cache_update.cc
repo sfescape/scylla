@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
                 .build();
 
             cache_tracker tracker;
-            row_cache cache(s, [] (auto&&) { return make_empty_reader(); }, tracker);
+            row_cache cache(s, make_empty_snapshot_source(), tracker);
 
             size_t partitions = app.configuration()["partitions"].as<unsigned>();
             size_t cell_size = app.configuration()["cell-size"].as<unsigned>();
@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
             for (unsigned i = 0; i < partitions; ++i) {
                 mutation m(new_key(s), s);
                 for (size_t j = 0; j < row_count; j++) {
-                    m.set_clustered_cell(new_ckey(s), "v", bytes(bytes::initialized_later(), cell_size), 2);
+                    m.set_clustered_cell(new_ckey(s), "v", data_value(bytes(bytes::initialized_later(), cell_size)), 2);
                 }
                 mutations.emplace_back(std::move(m));
             }
@@ -90,12 +90,8 @@ int main(int argc, char** argv) {
                     mt->apply(m);
                 }
 
-                auto checker = [](const partition_key& key) {
-                    return partition_presence_checker_result::maybe_exists;
-                };
-
                 if (update_cache) {
-                    cache.update(*mt, checker).get();
+                    cache.update([] {}, *mt).get();
                 }
             }, 5, 1);
         });

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -46,6 +46,9 @@
 #include "cartesian_product.hh"
 #include "cql3/restrictions/primary_key_restrictions.hh"
 #include "cql3/restrictions/single_column_restrictions.hh"
+#include <boost/algorithm/cxx11/all_of.hpp>
+#include <boost/range/adaptor/transformed.hpp>
+#include <boost/range/adaptor/filtered.hpp>
 
 namespace cql3 {
 
@@ -94,6 +97,14 @@ public:
         return _in;
     }
 
+    virtual bool has_bound(statements::bound b) const override {
+        return boost::algorithm::all_of(_restrictions->restrictions(), [b] (auto&& r) { return r.second->has_bound(b); });
+    }
+
+    virtual bool is_inclusive(statements::bound b) const override {
+        return boost::algorithm::all_of(_restrictions->restrictions(), [b] (auto&& r) { return r.second->is_inclusive(b); });
+    }
+
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override {
         return _restrictions->uses_function(ks_name, function_name);
     }
@@ -113,7 +124,7 @@ public:
                 if (restriction->is_slice()) {
                     throw exceptions::invalid_request_exception(sprint(
                         "PRIMARY KEY column \"%s\" cannot be restricted (preceding column \"%s\" is restricted by a non-EQ relation)",
-                        _restrictions->next_column(new_column)->name_as_text(), new_column.name_as_text()));
+                        last_column.name_as_text(), new_column.name_as_text()));
                 }
             }
 
@@ -305,11 +316,11 @@ public:
         fail(unimplemented::cause::LEGACY_COMPOSITE_KEYS); // not 100% correct...
     }
 
-#if 0
-    virtual bool hasSupportingIndex(SecondaryIndexManager indexManager) override {
-        return restrictions.hasSupportingIndex(indexManager);
+    virtual bool has_supporting_index(const secondary_index::secondary_index_manager& index_manager) const override {
+        return _restrictions->has_supporting_index(index_manager);
     }
 
+#if 0
     virtual void addIndexExpressionTo(List<IndexExpression> expressions, QueryOptions options) override {
         restrictions.addIndexExpressionTo(expressions, options);
     }
@@ -329,18 +340,29 @@ public:
     sstring to_string() const override {
         return sprint("Restrictions(%s)", join(", ", get_column_defs()));
     }
+
+    virtual bool is_satisfied_by(const schema& schema,
+                                 const partition_key& key,
+                                 const clustering_key_prefix& ckey,
+                                 const row& cells,
+                                 const query_options& options,
+                                 gc_clock::time_point now) const override {
+        return boost::algorithm::all_of(
+            _restrictions->restrictions() | boost::adaptors::map_values,
+            [&] (auto&& r) { return r->is_satisfied_by(schema, key, ckey, cells, options, now); });
+    }
 };
 
 template<>
-std::vector<query::partition_range>
+dht::partition_range_vector
 single_column_primary_key_restrictions<partition_key>::bounds_ranges(const query_options& options) const {
-    std::vector<query::partition_range> ranges;
+    dht::partition_range_vector ranges;
     ranges.reserve(size());
     for (query::range<partition_key>& r : compute_bounds(options)) {
         if (!r.is_singular()) {
             throw exceptions::invalid_request_exception("Range queries on partition key values not supported.");
         }
-        ranges.emplace_back(std::move(r).transform<query::ring_position>(
+        ranges.emplace_back(std::move(r).transform(
             [this] (partition_key&& k) -> query::ring_position {
                 auto token = dht::global_partitioner().get_token(*_schema, k);
                 return { std::move(token), std::move(k) };
@@ -352,7 +374,14 @@ single_column_primary_key_restrictions<partition_key>::bounds_ranges(const query
 template<>
 std::vector<query::clustering_range>
 single_column_primary_key_restrictions<clustering_key_prefix>::bounds_ranges(const query_options& options) const {
-    auto bounds = compute_bounds(options);
+    auto wrapping_bounds = compute_bounds(options);
+    auto bounds = boost::copy_range<query::clustering_row_ranges>(wrapping_bounds
+            | boost::adaptors::filtered([&](auto&& r) {
+                auto bounds = bound_view::from_range(r);
+                return !bound_view::compare(*_schema)(bounds.second, bounds.first);
+              })
+            | boost::adaptors::transformed([&](auto&& r) { return query::clustering_range(std::move(r));
+    }));
     auto less_cmp = clustering_key_prefix::less_compare(*_schema);
     std::sort(bounds.begin(), bounds.end(), [&] (query::clustering_range& x, query::clustering_range& y) {
         if (!x.start() && !y.start()) {

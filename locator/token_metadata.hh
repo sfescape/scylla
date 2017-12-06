@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -46,12 +46,17 @@
 #include "utils/UUID.hh"
 #include <experimental/optional>
 #include <boost/range/iterator_range.hpp>
+#include <boost/icl/interval.hpp>
+#include <boost/icl/interval_map.hpp>
 #include "query-request.hh"
+#include "range.hh"
 
 // forward declaration since database.hh includes this file
 class keyspace;
 
 namespace locator {
+
+class abstract_replication_strategy;
 
 using inet_address = gms::inet_address;
 using token = dht::token;
@@ -78,6 +83,17 @@ public:
      * Removes current DC/rack assignment for ep
      */
     void remove_endpoint(inet_address ep);
+
+    /**
+     * Re-reads the DC/rack info for the given endpoint
+     * @param ep endpoint in question
+     */
+    void update_endpoint(inet_address ep);
+
+    /**
+     * Returns true iff contains given endpoint
+     */
+    bool has_endpoint(inet_address) const;
 
     std::unordered_map<sstring,
                        std::unordered_set<inet_address>>&
@@ -133,6 +149,10 @@ private:
     std::unordered_map<token, inet_address> _bootstrap_tokens;
     std::unordered_set<inet_address> _leaving_endpoints;
     std::unordered_map<token, inet_address> _moving_endpoints;
+
+    std::unordered_map<sstring, std::unordered_multimap<range<token>, inet_address>> _pending_ranges;
+    std::unordered_map<sstring, std::unordered_map<range<token>, std::unordered_set<inet_address>>> _pending_ranges_map;
+    std::unordered_map<sstring, boost::icl::interval_map<token, std::unordered_set<inet_address>>> _pending_ranges_interval_map;
 
     std::vector<token> _sorted_tokens;
 
@@ -234,6 +254,10 @@ public:
         return _bootstrap_tokens;
     }
 
+    void update_topology(inet_address ep) {
+        _topology.update_endpoint(ep);
+    }
+
     tokens_iterator tokens_end() const {
         return tokens_iterator(sorted_tokens().end(), sorted_tokens().size());
     }
@@ -253,7 +277,7 @@ public:
     }
 
     boost::iterator_range<tokens_iterator> ring_range(
-        const std::experimental::optional<query::partition_range::bound>& start, bool include_min = false) const;
+        const std::experimental::optional<dht::partition_range::bound>& start, bool include_min = false) const;
 
     topology& get_topology() {
         return _topology;
@@ -305,7 +329,6 @@ public:
     // (don't need to record Token here since it's still part of tokenToEndpointMap until it's done leaving)
     private final Set<InetAddress> leavingEndpoints = new HashSet<InetAddress>();
     // this is a cache of the calculation from {tokenToEndpointMap, bootstrapTokens, leavingEndpoints}
-    private final ConcurrentMap<String, Multimap<Range<Token>, InetAddress>> pendingRanges = new ConcurrentHashMap<String, Multimap<Range<Token>, InetAddress>>();
 
     // nodes which are migrating to the new tokens in the ring
     private final Set<Pair<Token, InetAddress>> _moving_endpoints = new HashSet<Pair<Token, InetAddress>>();
@@ -457,44 +480,16 @@ public:
     void add_bootstrap_tokens(std::unordered_set<token> tokens, inet_address endpoint);
 
     void remove_bootstrap_tokens(std::unordered_set<token> tokens);
-#if 0
 
-    public void addLeavingEndpoint(InetAddress endpoint)
-    {
-        assert endpoint != null;
-
-        lock.writeLock().lock();
-        try
-        {
-            _leaving_endpoints.add(endpoint);
-        }
-        finally
-        {
-            lock.writeLock().unlock();
-        }
-    }
+    void add_leaving_endpoint(inet_address endpoint);
+public:
 
     /**
      * Add a new moving endpoint
      * @param token token which is node moving to
      * @param endpoint address of the moving node
      */
-    public void addMovingEndpoint(Token token, InetAddress endpoint)
-    {
-        assert endpoint != null;
-
-        lock.writeLock().lock();
-
-        try
-        {
-            _moving_endpoints.add(Pair.create(token, endpoint));
-        }
-        finally
-        {
-            lock.writeLock().unlock();
-        }
-    }
-#endif
+    void add_moving_endpoint(token t, inet_address endpoint);
 public:
     void remove_endpoint(inet_address endpoint);
 
@@ -543,25 +538,17 @@ public:
     }
 #if 0
     private final AtomicReference<TokenMetadata> cachedTokenMap = new AtomicReference<TokenMetadata>();
+#endif
+public:
 
     /**
      * Create a copy of TokenMetadata with only tokenToEndpointMap. That is, pending ranges,
      * bootstrap tokens and leaving endpoints are not included in the copy.
      */
-    public TokenMetadata cloneOnlyTokenMap()
-    {
-        lock.readLock().lock();
-        try
-        {
-            return new TokenMetadata(SortedBiMultiValMap.<Token, InetAddress>create(tokenToEndpointMap, null, inetaddressCmp),
-                                     HashBiMap.create(_endpoint_to_host_id_map),
-                                     new Topology(topology));
-        }
-        finally
-        {
-            lock.readLock().unlock();
-        }
+    token_metadata clone_only_token_map() {
+        return token_metadata(this->_token_to_endpoint_map, this->_endpoint_to_host_id_map, this->_topology);
     }
+#if 0
 
     /**
      * Return a cached TokenMetadata with only tokenToEndpointMap, i.e., the same as cloneOnlyTokenMap but
@@ -587,60 +574,32 @@ public:
             return tm;
         }
     }
-
+#endif
     /**
      * Create a copy of TokenMetadata with tokenToEndpointMap reflecting situation after all
      * current leave operations have finished.
      *
      * @return new token metadata
      */
-    public TokenMetadata cloneAfterAllLeft()
-    {
-        lock.readLock().lock();
-        try
-        {
-            TokenMetadata allLeftMetadata = cloneOnlyTokenMap();
+    token_metadata clone_after_all_left() {
+        auto all_left_metadata = clone_only_token_map();
 
-            for (InetAddress endpoint : _leaving_endpoints)
-                allLeftMetadata.removeEndpoint(endpoint);
+        for (auto endpoint : _leaving_endpoints) {
+            all_left_metadata.remove_endpoint(endpoint);
+        }
 
-            return allLeftMetadata;
-        }
-        finally
-        {
-            lock.readLock().unlock();
-        }
+        return all_left_metadata;
     }
 
+public:
     /**
      * Create a copy of TokenMetadata with tokenToEndpointMap reflecting situation after all
      * current leave, and move operations have finished.
      *
      * @return new token metadata
      */
-    public TokenMetadata cloneAfterAllSettled()
-    {
-        lock.readLock().lock();
-
-        try
-        {
-            TokenMetadata metadata = cloneOnlyTokenMap();
-
-            for (InetAddress endpoint : _leaving_endpoints)
-                metadata.removeEndpoint(endpoint);
-
-
-            for (Pair<Token, InetAddress> pair : _moving_endpoints)
-                metadata.updateNormalToken(pair.left, pair.right);
-
-            return metadata;
-        }
-        finally
-        {
-            lock.readLock().unlock();
-        }
-    }
-
+    token_metadata clone_after_all_settled();
+#if 0
     public InetAddress getEndpoint(Token token)
     {
         lock.readLock().lock();
@@ -653,58 +612,23 @@ public:
             lock.readLock().unlock();
         }
     }
+#endif
+public:
+    dht::token_range_vector get_primary_ranges_for(std::unordered_set<token> tokens);
 
-    public Collection<Range<Token>> getPrimaryRangesFor(Collection<Token> tokens)
-    {
-        Collection<Range<Token>> ranges = new ArrayList<Range<Token>>(tokens.size());
-        for (Token right : tokens)
-            ranges.add(new Range<Token>(getPredecessor(right), right));
-        return ranges;
-    }
+    dht::token_range_vector get_primary_ranges_for(token right);
+    static boost::icl::interval<token>::interval_type range_to_interval(range<dht::token> r);
+    static range<dht::token> interval_to_range(boost::icl::interval<token>::interval_type i);
 
-    @Deprecated
-    public Range<Token> getPrimaryRangeFor(Token right)
-    {
-        return getPrimaryRangesFor(Arrays.asList(right)).iterator().next();
-    }
+private:
+    std::unordered_multimap<range<token>, inet_address>& get_pending_ranges_mm(sstring keyspace_name);
+    void set_pending_ranges(const sstring& keyspace_name, std::unordered_multimap<range<token>, inet_address> new_pending_ranges);
 
-    public ArrayList<Token> sortedTokens()
-    {
-        return sortedTokens;
-    }
-
-    private Multimap<Range<Token>, InetAddress> getPendingRangesMM(String keyspaceName)
-    {
-        Multimap<Range<Token>, InetAddress> map = pendingRanges.get(keyspaceName);
-        if (map == null)
-        {
-            map = HashMultimap.create();
-            Multimap<Range<Token>, InetAddress> priorMap = pendingRanges.putIfAbsent(keyspaceName, map);
-            if (priorMap != null)
-                map = priorMap;
-        }
-        return map;
-    }
-
+public:
     /** a mutable map may be returned but caller should not modify it */
-    public Map<Range<Token>, Collection<InetAddress>> getPendingRanges(String keyspaceName)
-    {
-        return getPendingRangesMM(keyspaceName).asMap();
-    }
+    const std::unordered_map<range<token>, std::unordered_set<inet_address>>& get_pending_ranges(sstring keyspace_name);
 
-    public List<Range<Token>> getPendingRanges(String keyspaceName, InetAddress endpoint)
-    {
-        List<Range<Token>> ranges = new ArrayList<Range<Token>>();
-        for (Map.Entry<Range<Token>, InetAddress> entry : getPendingRangesMM(keyspaceName).entries())
-        {
-            if (entry.getValue().equals(endpoint))
-            {
-                ranges.add(entry.getKey());
-            }
-        }
-        return ranges;
-    }
-
+    std::vector<range<token>> get_pending_ranges(sstring keyspace_name, inet_address endpoint);
      /**
      * Calculate pending ranges according to bootsrapping and leaving nodes. Reasoning is:
      *
@@ -728,97 +652,12 @@ public:
      * NOTE: This is heavy and ineffective operation. This will be done only once when a node
      * changes state in the cluster, so it should be manageable.
      */
-    public void calculatePendingRanges(AbstractReplicationStrategy strategy, String keyspaceName)
-    {
-        lock.readLock().lock();
-        try
-        {
-            Multimap<Range<Token>, InetAddress> newPendingRanges = HashMultimap.create();
+    void calculate_pending_ranges(abstract_replication_strategy& strategy, const sstring& keyspace_name);
+public:
 
-            if (_bootstrap_tokens.isEmpty() && _leaving_endpoints.isEmpty() && _moving_endpoints.isEmpty())
-            {
-                if (logger.isDebugEnabled())
-                    logger.debug("No bootstrapping, leaving or moving nodes -> empty pending ranges for {}", keyspaceName);
+    token get_predecessor(token t);
 
-                pendingRanges.put(keyspaceName, newPendingRanges);
-                return;
-            }
-
-            Multimap<InetAddress, Range<Token>> addressRanges = strategy.getAddressRanges();
-
-            // Copy of metadata reflecting the situation after all leave operations are finished.
-            TokenMetadata allLeftMetadata = cloneAfterAllLeft();
-
-            // get all ranges that will be affected by leaving nodes
-            Set<Range<Token>> affectedRanges = new HashSet<Range<Token>>();
-            for (InetAddress endpoint : _leaving_endpoints)
-                affectedRanges.addAll(addressRanges.get(endpoint));
-
-            // for each of those ranges, find what new nodes will be responsible for the range when
-            // all leaving nodes are gone.
-            TokenMetadata metadata = cloneOnlyTokenMap(); // don't do this in the loop! #7758
-            for (Range<Token> range : affectedRanges)
-            {
-                Set<InetAddress> currentEndpoints = ImmutableSet.copyOf(strategy.calculateNaturalEndpoints(range.right, metadata));
-                Set<InetAddress> newEndpoints = ImmutableSet.copyOf(strategy.calculateNaturalEndpoints(range.right, allLeftMetadata));
-                newPendingRanges.putAll(range, Sets.difference(newEndpoints, currentEndpoints));
-            }
-
-            // At this stage newPendingRanges has been updated according to leave operations. We can
-            // now continue the calculation by checking bootstrapping nodes.
-
-            // For each of the bootstrapping nodes, simply add and remove them one by one to
-            // allLeftMetadata and check in between what their ranges would be.
-            Multimap<InetAddress, Token> bootstrapAddresses = _bootstrap_tokens.inverse();
-            for (InetAddress endpoint : bootstrapAddresses.keySet())
-            {
-                Collection<Token> tokens = bootstrapAddresses.get(endpoint);
-
-                allLeftMetadata.updateNormalTokens(tokens, endpoint);
-                for (Range<Token> range : strategy.getAddressRanges(allLeftMetadata).get(endpoint))
-                    newPendingRanges.put(range, endpoint);
-                allLeftMetadata.removeEndpoint(endpoint);
-            }
-
-            // At this stage newPendingRanges has been updated according to leaving and bootstrapping nodes.
-            // We can now finish the calculation by checking moving nodes.
-
-            // For each of the moving nodes, we do the same thing we did for bootstrapping:
-            // simply add and remove them one by one to allLeftMetadata and check in between what their ranges would be.
-            for (Pair<Token, InetAddress> moving : _moving_endpoints)
-            {
-                InetAddress endpoint = moving.right; // address of the moving node
-
-                //  moving.left is a new token of the endpoint
-                allLeftMetadata.updateNormalToken(moving.left, endpoint);
-
-                for (Range<Token> range : strategy.getAddressRanges(allLeftMetadata).get(endpoint))
-                {
-                    newPendingRanges.put(range, endpoint);
-                }
-
-                allLeftMetadata.removeEndpoint(endpoint);
-            }
-
-            pendingRanges.put(keyspaceName, newPendingRanges);
-
-            if (logger.isDebugEnabled())
-                logger.debug("Pending ranges:\n{}", (pendingRanges.isEmpty() ? "<empty>" : printPendingRanges()));
-        }
-        finally
-        {
-            lock.readLock().unlock();
-        }
-    }
-
-    public Token getPredecessor(Token token)
-    {
-        List tokens = sortedTokens();
-        int index = Collections.binarySearch(tokens, token);
-        assert index >= 0 : token + " not found in " + StringUtils.join(tokenToEndpointMap.keySet(), ", ");
-        return (Token) (index == 0 ? tokens.get(tokens.size() - 1) : tokens.get(index - 1));
-    }
-
+#if 0
     public Token getSuccessor(Token token)
     {
         List tokens = sortedTokens();
@@ -852,6 +691,10 @@ public:
            return p.first;
         });
         return tmp;
+    }
+
+    size_t get_all_endpoints_count() const {
+        return _endpoint_to_host_id_map.size();
     }
 
 #if 0
@@ -969,7 +812,7 @@ public:
             _endpoint_to_host_id_map.clear();
             _bootstrap_tokens.clear();
             _leaving_endpoints.clear();
-            pendingRanges.clear();
+            _pending_ranges.clear();
             _moving_endpoints.clear();
             sortedTokens.clear();
             topology.clear();
@@ -1024,7 +867,7 @@ public:
                 }
             }
 
-            if (!pendingRanges.isEmpty())
+            if (!_pending_ranges.isEmpty())
             {
                 sb.append("Pending Ranges:");
                 sb.append(System.getProperty("line.separator"));
@@ -1038,42 +881,10 @@ public:
 
         return sb.toString();
     }
-
-    private String printPendingRanges()
-    {
-        StringBuilder sb = new StringBuilder();
-
-        for (Map.Entry<String, Multimap<Range<Token>, InetAddress>> entry : pendingRanges.entrySet())
-        {
-            for (Map.Entry<Range<Token>, InetAddress> rmap : entry.getValue().entries())
-            {
-                sb.append(rmap.getValue()).append(":").append(rmap.getKey());
-                sb.append(System.getProperty("line.separator"));
-            }
-        }
-
-        return sb.toString();
-    }
 #endif
-    std::vector<gms::inet_address> pending_endpoints_for(const token& token, const keyspace& ks)
-    {
-        // FIXME: implement it
-        return std::vector<gms::inet_address>();
-#if 0
-        Map<Range<Token>, Collection<InetAddress>> ranges = getPendingRanges(keyspaceName);
-        if (ranges.isEmpty())
-            return Collections.emptyList();
-
-        Set<InetAddress> endpoints = new HashSet<InetAddress>();
-        for (Map.Entry<Range<Token>, Collection<InetAddress>> entry : ranges.entrySet())
-        {
-            if (entry.getKey().contains(token))
-                endpoints.addAll(entry.getValue());
-        }
-
-        return endpoints;
-#endif
-    }
+    sstring print_pending_ranges();
+public:
+    std::vector<gms::inet_address> pending_endpoints_for(const token& token, const sstring& keyspace_name);
 #if 0
     /**
      * @deprecated retained for benefit of old tests
@@ -1082,44 +893,18 @@ public:
     {
         return ImmutableList.copyOf(Iterables.concat(naturalEndpoints, pendingEndpointsFor(token, keyspaceName)));
     }
+#endif
 
+public:
     /** @return an endpoint to token multimap representation of tokenToEndpointMap (a copy) */
-    public Multimap<InetAddress, Token> getEndpointToTokenMapForReading()
-    {
-        lock.readLock().lock();
-        try
-        {
-            Multimap<InetAddress, Token> cloned = HashMultimap.create();
-            for (Map.Entry<Token, InetAddress> entry : tokenToEndpointMap.entrySet())
-                cloned.put(entry.getValue(), entry.getKey());
-            return cloned;
-        }
-        finally
-        {
-            lock.readLock().unlock();
-        }
-    }
-
+    std::multimap<inet_address, token> get_endpoint_to_token_map_for_reading();
     /**
      * @return a (stable copy, won't be modified) Token to Endpoint map for all the normal and bootstrapping nodes
      *         in the cluster.
      */
-    public Map<Token, InetAddress> getNormalAndBootstrappingTokenToEndpointMap()
-    {
-        lock.readLock().lock();
-        try
-        {
-            Map<Token, InetAddress> map = new HashMap<Token, InetAddress>(tokenToEndpointMap.size() + _bootstrap_tokens.size());
-            map.putAll(tokenToEndpointMap);
-            map.putAll(_bootstrap_tokens);
-            return map;
-        }
-        finally
-        {
-            lock.readLock().unlock();
-        }
-    }
+    std::map<token, inet_address> get_normal_and_bootstrapping_token_to_endpoint_map();
 
+#if 0
     /**
      * @return the Topology map of nodes to DCs + Racks
      *

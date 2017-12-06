@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -21,7 +21,6 @@
 
 #pragma once
 
-#include "types.hh"
 #include "net/ip.hh"
 #include "utils/serialization.hh"
 #include <sstream>
@@ -37,7 +36,19 @@ public:
     inet_address(int32_t ip)
         : _addr(uint32_t(ip)) {
     }
+    explicit inet_address(uint32_t ip)
+        : _addr(ip) {
+    }
     inet_address(net::ipv4_address&& addr) : _addr(std::move(addr)) {}
+
+    inet_address(const socket_address& sa) {
+        if (sa.u.in.sin_family == AF_INET) {
+            _addr = net::ipv4_address(ipv4_addr(sa));
+        } else {
+            // Not supported
+            throw std::invalid_argument("IPv6 socket addresses are not supported.");
+        }
+    }
 
     const net::ipv4_address& addr() const {
         return _addr;
@@ -57,18 +68,8 @@ public:
     bool is_broadcast_address() {
         return _addr == net::ipv4::broadcast_address();
     }
-    void serialize(bytes::iterator& out) const {
-        int8_t inet_address_size = sizeof(inet_address);
-        serialize_int8(out, inet_address_size);
-        serialize_int32(out, _addr.ip);
-    }
-    static inet_address deserialize(bytes_view& v) {
-        int8_t inet_address_size = read_simple<int8_t>(v);
-        assert(inet_address_size == sizeof(inet_address));
-        return inet_address(read_simple<int32_t>(v));
-    }
-    size_t serialized_size() const {
-        return serialize_int8_size + serialize_int32_size;
+    sstring to_sstring() const {
+        return sprint("%s", *this);
     }
     friend inline bool operator==(const inet_address& x, const inet_address& y) {
         return x._addr == y._addr;
@@ -83,7 +84,11 @@ public:
         return os << x._addr;
     }
     friend struct std::hash<inet_address>;
+
+    static future<inet_address> lookup(sstring);
 };
+
+std::ostream& operator<<(std::ostream& os, const inet_address& x);
 
 }
 

@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -27,32 +27,60 @@
 #include "gms/gossiper.hh"
 #include "gms/application_state.hh"
 #include "service/storage_service.hh"
+#include "utils/fb_utilities.hh"
+#include "locator/snitch_base.hh"
 #include "log.hh"
+#include <seastar/core/thread.hh>
 #include <chrono>
 
 namespace bpo = boost::program_options;
 
+// === How to run the test
+// node1:
+// ./gossip --seed 127.0.0.1  --listen-address 127.0.0.1 -c 2
+//
+// node2:
+// ./gossip --seed 127.0.0.1  --listen-address 127.0.0.2 -c 2
+//
+// node3:
+// ./gossip --seed 127.0.0.1  --listen-address 127.0.0.3 -c 2
+//
+// === What to expect
+//
+// Each node should see the LOAD status of other nodes. The load status is increased by 0.0001 every second.
+// And the version number in the HeartBeatState increases every second.
+// Example of the output:
+//
+// DEBUG [shard 0] gossip - ep=127.0.0.1, eps=HeartBeatState = { generation = 1446454365, version = 68 }, AppStateMap = { LOAD : Value(0.5019,67) }
+// DEBUG [shard 0] gossip - ep=127.0.0.2, eps=HeartBeatState = { generation = 1446454380, version = 27 }, AppStateMap = { LOAD : Value(0.5005,26) }
+
 int main(int ac, char ** av) {
     distributed<database> db;
+    sharded<auth::service> auth_service;
     app_template app;
     app.add_options()
         ("seed", bpo::value<std::vector<std::string>>(), "IP address of seed node")
         ("listen-address", bpo::value<std::string>()->default_value("0.0.0.0"), "IP address to listen");
-    return app.run_deprecated(ac, av, [&db, &app] {
+    return app.run_deprecated(ac, av, [&auth_service, &db, &app] {
         auto config = app.configuration();
         logging::logger_registry().set_logger_level("gossip", logging::log_level::trace);
         const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
-        service::init_storage_service(db).then([listen, config] {
-            return net::get_messaging_service().start(listen);
+        utils::fb_utilities::set_broadcast_address(listen);
+        utils::fb_utilities::set_broadcast_rpc_address(listen);
+        auto vv = std::make_shared<gms::versioned_value::factory>();
+        locator::i_endpoint_snitch::create_snitch("SimpleSnitch").then([&auth_service, &db] {
+            return service::init_storage_service(db, auth_service);
+        }).then([vv, listen, config] {
+            return netw::get_messaging_service().start(listen);
         }).then([config] {
-            auto& server = net::get_local_messaging_service();
+            auto& server = netw::get_local_messaging_service();
             auto port = server.port();
             auto listen = server.listen_address();
             print("Messaging server listening on ip %s port %d ...\n", listen, port);
             return gms::get_failure_detector().start();
-        }).then([config] {
+        }).then([vv, config] {
             return gms::get_gossiper().start();
-        }).then([config] {
+        }).then([vv, config] {
             std::set<gms::inet_address> seeds;
             for (auto s : config["seed"].as<std::vector<std::string>>()) {
                 seeds.emplace(std::move(s));
@@ -64,33 +92,23 @@ int main(int ac, char ** av) {
             gossiper.set_cluster_name("Test Cluster");
 
             std::map<gms::application_state, gms::versioned_value> app_states = {
-                { gms::application_state::LOAD, gms::versioned_value::versioned_value_factory::load(0.5) },
+                { gms::application_state::LOAD, vv->load(0.5) },
             };
 
             using namespace std::chrono;
             auto now = high_resolution_clock::now().time_since_epoch();
             int generation_number = duration_cast<seconds>(now).count();
-            return gossiper.start(generation_number, app_states);
-        }).then([] () {
-            auto reporter = std::make_shared<timer<lowres_clock>>();
-            reporter->set_callback ([reporter] {
-                auto& gossiper = gms::get_local_gossiper();
-                gossiper.dump_endpoint_state_map();
-                auto& fd = gms::get_local_failure_detector();
-                print("%s", fd);
-            });
-            reporter->arm_periodic(std::chrono::milliseconds(1000));
-
-            auto app_state_adder = std::make_shared<timer<lowres_clock>>();
-            app_state_adder->set_callback ([app_state_adder] {
+            return gossiper.start_gossiping(generation_number, app_states);
+        }).then([vv] {
+            return seastar::async([vv] {
                 static double load = 0.5;
-                auto& gossiper = gms::get_local_gossiper();
-                auto state = gms::application_state::LOAD;
-                auto value = gms::versioned_value::versioned_value_factory::load(load);
-                gossiper.add_local_application_state(state, value);
-                load += 0.0001;
+                for (;;) {
+                    auto value = vv->load(load);
+                    load += 0.0001;
+                    gms::get_local_gossiper().add_local_application_state(gms::application_state::LOAD, value).get();
+                    sleep(std::chrono::seconds(1)).get();
+                }
             });
-            app_state_adder->arm_periodic(std::chrono::seconds(1));
         });
     });
 }

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -41,7 +41,7 @@
 
 #include "transport/event.hh"
 
-namespace transport {
+namespace cql_transport {
 
 event::event(const event_type& type_)
     : type{type_}

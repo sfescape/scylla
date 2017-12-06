@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -78,6 +78,18 @@ lw_shared_ptr<keyspace_metadata> ks_prop_defs::as_ks_metadata(sstring ks_name) {
     options.erase(REPLICATION_STRATEGY_CLASS_KEY);
     return keyspace_metadata::new_keyspace(ks_name, get_replication_strategy_class().value(), options, get_boolean(KW_DURABLE_WRITES, true));
 }
+
+lw_shared_ptr<keyspace_metadata> ks_prop_defs::as_ks_metadata_update(lw_shared_ptr<keyspace_metadata> old) {
+    auto options = get_replication_options();
+    options.erase(REPLICATION_STRATEGY_CLASS_KEY);
+    auto sc = get_replication_strategy_class();
+    if (!sc) {
+        sc = old->strategy_name();
+        options = old->strategy_options();
+    }
+    return keyspace_metadata::new_keyspace(old->name(), *sc, options, get_boolean(KW_DURABLE_WRITES, true));
+}
+
 
 }
 

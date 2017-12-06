@@ -1,21 +1,35 @@
-#Scylla
+# Scylla
 
-##Building Scylla
+## Quick-start
 
-In addition to required packages by Seastar, the following packages are required by Scylla.
-
-### Submodules
-Scylla uses submodules, so make sure you pull the submodules first by doing:
+```bash
+$ git submodule update --init --recursive
+$ sudo ./install-dependencies.sh
+$ ./configure.py --mode=release
+$ ninja-build -j4 # Assuming 4 system threads.
+$ ./build/release/scylla
+$ # Rejoice!
 ```
-git submodule init
-git submodule update --recursive
+
+Please see [HACKING.md](HACKING.md) for detailed information on building and developing Scylla.
+
+## Running Scylla
+
+* Run Scylla
+```
+./build/release/scylla
+
 ```
 
-### Building scylla on Fedora
-Installing required packages:
+* run Scylla with one CPU and ./tmp as data directory
 
 ```
-sudo yum install yaml-cpp-devel lz4-devel zlib-devel snappy-devel jsoncpp-devel thrift-devel antlr3-tool antlr3-C++-devel libasan libubsan
+./build/release/scylla --datadir tmp --commitlog-directory tmp --smp 1
+```
+
+* For more run options:
+```
+./build/release/scylla --help
 ```
 
 ## Building Fedora RPM
@@ -56,5 +70,9 @@ docker build -t <image-name> .
 Run the image with:
 
 ```
-docker run -i -t <image name>
+docker run -p $(hostname -i):9042:9042 -i -t <image name>
 ```
+
+## Contributing to Scylla
+
+[Guidelines for contributing](CONTRIBUTING.md)

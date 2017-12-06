@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -48,10 +48,9 @@
 #include "service/storage_service.hh"
 #include "core/file.hh"
 #include "log.hh"
+#include "locator/reconnectable_snitch_helper.hh"
 
 namespace locator {
-
-class bad_property_file_error : public std::exception {};
 
 /**
  * cassandra-rackdc.properties file has the following format:
@@ -62,57 +61,46 @@ class bad_property_file_error : public std::exception {};
  */
 class gossiping_property_file_snitch : public production_snitch_base {
 public:
-    static constexpr const char* snitch_properties_filename = "cassandra-rackdc.properties";
     // Check the property file for changes every 60s.
-    static constexpr timer<>::duration reload_property_file_period() {
+    static constexpr timer<lowres_clock>::duration reload_property_file_period() {
         return std::chrono::seconds(60);
     }
 
-    virtual void gossiper_starting() override;
+    virtual future<> gossiper_starting() override;
     virtual future<> stop() override;
     virtual future<> start() override;
     virtual future<> pause_io() override;
     virtual void resume_io() override;
-
-    gossiping_property_file_snitch(
-        const sstring& fname = snitch_properties_filename,
-        unsigned io_cpu_id = 0);
-
     virtual sstring get_name() const override {
         return "org.apache.cassandra.locator.GossipingPropertyFileSnitch";
     }
 
+    gossiping_property_file_snitch(
+        const sstring& fname = "",
+        unsigned io_cpuid = 0);
+
+    /**
+     * This function register a Gossiper subscriber to reconnect according to
+     * the new "prefer_local" value, namely use either an internal or extenal IP
+     * address.
+     *
+     * @note Currently in order to be backward compatible we are mimicking the C*
+     *       behavior, which is a bit strange: while allowing the change of
+     *       prefer_local value during the same run it won't actually trigger
+     *       disconnect from all remote nodes as would be logical (in order to
+     *       connect using a new configuration). On the contrary, if the new
+     *       prefer_local value is TRUE, it will trigger the reconnect only when
+     *       there is a corresponding gossip event (e.g. on_change()) from the
+     *       corresponding node has been accepted. If the new value is FALSE
+     *       then it won't trigger disconnect at all! And in any case a remote
+     *       node will be reconnected using the PREFERED_IP value stored in the
+     *       system_table.peer.
+     *
+     * This is currently relevant to EC2/GCE(?) only.
+     */
+    virtual void reload_gossiper_state() override;
+
 private:
-    static logging::logger& logger() {
-        return i_endpoint_snitch::snitch_logger;
-    }
-
-    template <typename... Args>
-    void err(const char* fmt, Args&&... args) const {
-        logger().error(fmt, std::forward<Args>(args)...);
-    }
-
-    template <typename... Args>
-    void warn(const char* fmt, Args&&... args) const {
-        logger().warn(fmt, std::forward<Args>(args)...);
-    }
-
-    void throw_double_declaration(const sstring& key) const {
-        err("double \"{}\" declaration in {}", key, _fname);
-        throw bad_property_file_error();
-    }
-
-    void throw_bad_format(const sstring& line) const {
-        err("Bad format in properties file {}: {}", _fname, line);
-        throw bad_property_file_error();
-    }
-
-    void throw_incomplete_file() const {
-        err("Property file {} is incomplete. Both \"dc\" and \"rack\" "
-            "labels have to be defined.", _fname);
-        throw bad_property_file_error();
-    }
-
     void periodic_reader_callback();
 
     /**
@@ -137,15 +125,6 @@ private:
     future<> read_property_file();
 
     /**
-     * TODO: this function is expected to trigger a Gossiper to reconnect
-     * according to the new "prefer_local" value, namely use either an internal
-     * or extenal IP address.
-     *
-     * This is currently relevant to EC2/GCE(?) only.
-     */
-    void reload_gossiper_state();
-
-    /**
      * Indicate that the snitch has stopped its I/O.
      */
     void set_stopped();
@@ -154,16 +133,11 @@ private:
     void start_io();
 
 private:
-    sstring _fname;
-    timer<> _file_reader;
-    lw_shared_ptr<file> _sf;
+    timer<lowres_clock> _file_reader;
     std::experimental::optional<timespec> _last_file_mod;
-    size_t _fsize;
-    std::string _srting_buf;
     std::istringstream _istrm;
-    bool _gossip_started = false;
-    bool _prefer_local = false;
     bool _file_reader_runs = false;
     unsigned _file_reader_cpu_id;
+    shared_ptr<reconnectable_snitch_helper> _reconnectable_helper;
 };
 } // namespace locator

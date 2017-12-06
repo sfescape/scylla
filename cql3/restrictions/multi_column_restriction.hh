@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -85,6 +85,20 @@ public:
         do_merge_with(as_pkr);
     }
 
+    bool is_satisfied_by(const schema& schema,
+                         const partition_key& key,
+                         const clustering_key_prefix& ckey,
+                         const row& cells,
+                         const query_options& options,
+                         gc_clock::time_point now) const override {
+        for (auto&& range : bounds_ranges(options)) {
+            if (!range.contains(ckey, clustering_key_prefix::prefix_equal_tri_compare(schema))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
 protected:
     virtual void do_merge_with(::shared_ptr<primary_key_restrictions<clustering_key_prefix>> other) = 0;
 
@@ -114,19 +128,18 @@ protected:
         }
         return str;
     }
-#if 0
-    @Override
-    public final boolean hasSupportingIndex(SecondaryIndexManager indexManager)
-    {
-        for (ColumnDefinition columnDef : columnDefs)
-        {
-            SecondaryIndex index = indexManager.getIndexForColumn(columnDef.name.bytes);
-            if (index != null && isSupportedBy(index))
+
+    virtual bool has_supporting_index(const secondary_index::secondary_index_manager& index_manager) const override {
+        for (const auto& index : index_manager.list_indexes()) {
+            if (is_supported_by(index))
                 return true;
         }
         return false;
     }
 
+    virtual bool is_supported_by(const secondary_index::index& index) const = 0;
+
+#if 0
     /**
      * Check if this type of restriction is supported for the specified column by the specified index.
      * @param index the Secondary index
@@ -155,7 +168,16 @@ public:
     { }
 
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override {
-        return abstract_restriction::uses_function(_value, ks_name, function_name);
+        return abstract_restriction::term_uses_function(_value, ks_name, function_name);
+    }
+
+    virtual bool is_supported_by(const secondary_index::index& index) const override {
+        for (auto* cdef : _column_defs) {
+            if (index.supports_expression(*cdef, cql3::operator_type::EQ)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     virtual sstring to_string() const override {
@@ -217,6 +239,15 @@ public:
 class multi_column_restriction::IN : public multi_column_restriction {
 public:
     using multi_column_restriction::multi_column_restriction;
+
+    virtual bool is_supported_by(const secondary_index::index& index) const override {
+        for (auto* cdef : _column_defs) {
+            if (index.supports_expression(*cdef, cql3::operator_type::IN)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     virtual bool is_IN() const override {
         return true;
@@ -304,11 +335,11 @@ public:
     { }
 
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override  {
-        return abstract_restriction::uses_function(_values, ks_name, function_name);
+        return abstract_restriction::term_uses_function(_values, ks_name, function_name);
     }
 
     virtual sstring to_string() const override  {
-        return sprint("IN(%s)", ::to_string(_values));
+        return sprint("IN(%s)", std::to_string(_values));
     }
 
 protected:
@@ -365,6 +396,15 @@ public:
         : slice(schema, defs, term_slice::new_instance(bound, inclusive, term))
     { }
 
+    virtual bool is_supported_by(const secondary_index::index& index) const override {
+        for (auto* cdef : _column_defs) {
+            if (_slice.is_supported_by(*cdef, index)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     virtual bool is_slice() const override {
         return true;
     }
@@ -374,7 +414,7 @@ public:
     }
 
     virtual std::vector<bytes_opt> bounds(statements::bound b, const query_options& options) const override {
-        throw std::runtime_error("not implemented");
+        throw std::runtime_error(sprint("%s not implemented", __PRETTY_FUNCTION__));
 #if 0
         return Composites.toByteBuffers(boundsAsComposites(b, options));
 #endif
@@ -393,8 +433,12 @@ public:
             auto prefix = clustering_key_prefix::from_optional_exploded(*_schema, vals);
             return bounds_range_type::bound(prefix, is_inclusive(b));
         };
-        auto range = bounds_range_type(read_bound(statements::bound::START), read_bound(statements::bound::END));
-        return { range };
+        auto range = wrapping_range<clustering_key_prefix>(read_bound(statements::bound::START), read_bound(statements::bound::END));
+        auto bounds = bound_view::from_range(range);
+        if (bound_view::compare(*_schema)(bounds.second, bounds.first)) {
+            return { };
+        }
+        return { bounds_range_type(std::move(range)) };
     }
 #if 0
         @Override
@@ -424,8 +468,8 @@ public:
     }
 
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override {
-        return (_slice.has_bound(statements::bound::START) && abstract_restriction::uses_function(_slice.bound(statements::bound::START), ks_name, function_name))
-                || (_slice.has_bound(statements::bound::END) && abstract_restriction::uses_function(_slice.bound(statements::bound::END), ks_name, function_name));
+        return (_slice.has_bound(statements::bound::START) && abstract_restriction::term_uses_function(_slice.bound(statements::bound::START), ks_name, function_name))
+                || (_slice.has_bound(statements::bound::END) && abstract_restriction::term_uses_function(_slice.bound(statements::bound::END), ks_name, function_name));
     }
 
     virtual bool is_inclusive(statements::bound b) const override {

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -49,5 +49,14 @@ enum class read_repair_decision {
   DC_LOCAL
 };
 
+inline std::ostream&  operator<<(std::ostream& out, db::read_repair_decision d) {
+    switch (d) {
+    case db::read_repair_decision::NONE: out << "NONE"; break;
+    case db::read_repair_decision::GLOBAL: out << "GLOBAL"; break;
+    case db::read_repair_decision::DC_LOCAL: out << "DC_LOCAL"; break;
+    default: out << "ERR"; break;
+    }
+    return out;
 }
 
+}

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -71,16 +71,18 @@ int64_t attributes::get_timestamp(int64_t now, const query_options& options) {
     }
 
     auto tval = _timestamp->bind_and_get(options);
-    if (!tval) {
+    if (tval.is_null()) {
         throw exceptions::invalid_request_exception("Invalid null value of timestamp");
     }
-
+    if (tval.is_unset_value()) {
+        return now;
+    }
     try {
         data_type_for<int64_t>()->validate(*tval);
-    } catch (marshal_exception e) {
+    } catch (marshal_exception& e) {
         throw exceptions::invalid_request_exception("Invalid timestamp value");
     }
-    return boost::any_cast<int64_t>(data_type_for<int64_t>()->deserialize(*tval));
+    return value_cast<int64_t>(data_type_for<int64_t>()->deserialize(*tval));
 }
 
 int32_t attributes::get_time_to_live(const query_options& options) {
@@ -88,18 +90,20 @@ int32_t attributes::get_time_to_live(const query_options& options) {
         return 0;
 
     auto tval = _time_to_live->bind_and_get(options);
-    if (!tval) {
+    if (tval.is_null()) {
         throw exceptions::invalid_request_exception("Invalid null value of TTL");
     }
-
+    if (tval.is_unset_value()) {
+        return 0;
+    }
     try {
         data_type_for<int32_t>()->validate(*tval);
     }
-    catch (marshal_exception e) {
+    catch (marshal_exception& e) {
         throw exceptions::invalid_request_exception("Invalid TTL value");
     }
 
-    auto ttl = boost::any_cast<int32_t>(data_type_for<int32_t>()->deserialize(*tval));
+    auto ttl = value_cast<int32_t>(data_type_for<int32_t>()->deserialize(*tval));
     if (ttl < 0) {
         throw exceptions::invalid_request_exception("A TTL must be greater or equal to 0");
     }

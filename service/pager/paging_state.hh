@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -41,80 +41,45 @@
 
 #pragma once
 
-#include "unimplemented.hh"
+#include <experimental/optional>
+
 #include "bytes.hh"
+#include "keys.hh"
 
 namespace service {
 
 namespace pager {
 
 class paging_state final {
-#if 0
-    public final ByteBuffer partitionKey;
-    public final ByteBuffer cellName;
-    public final int remaining;
-
-    public PagingState(ByteBuffer partitionKey, ByteBuffer cellName, int remaining)
-    {
-        this.partitionKey = partitionKey == null ? ByteBufferUtil.EMPTY_BYTE_BUFFER : partitionKey;
-        this.cellName = cellName == null ? ByteBufferUtil.EMPTY_BYTE_BUFFER : cellName;
-        this.remaining = remaining;
-    }
-
-    public static PagingState deserialize(ByteBuffer bytes)
-    {
-        if (bytes == null)
-            return null;
-
-        try
-        {
-            DataInputStream in = new DataInputStream(ByteBufferUtil.inputStream(bytes));
-            ByteBuffer pk = ByteBufferUtil.readWithShortLength(in);
-            ByteBuffer cn = ByteBufferUtil.readWithShortLength(in);
-            int remaining = in.readInt();
-            return new PagingState(pk, cn, remaining);
-        }
-        catch (IOException e)
-        {
-            throw new ProtocolException("Invalid value for the paging state");
-        }
-    }
-#endif
+    partition_key _partition_key;
+    std::experimental::optional<clustering_key> _clustering_key;
+    uint32_t _remaining;
 
 public:
+    paging_state(partition_key pk, std::experimental::optional<clustering_key> ck, uint32_t rem);
 
-    bytes_opt serialize() {
-        fail(unimplemented::cause::PAGING);
-#if 0
-        try
-        {
-            DataOutputBuffer out = new DataOutputBuffer(serializedSize());
-            ByteBufferUtil.writeWithShortLength(partitionKey, out);
-            ByteBufferUtil.writeWithShortLength(cellName, out);
-            out.writeInt(remaining);
-            return out.asByteBuffer();
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException(e);
-        }
-#endif
+    /**
+     * Last processed key, i.e. where to start from in next paging round
+     */
+    const partition_key& get_partition_key() const {
+        return _partition_key;
+    }
+    /**
+     * Clustering key in last partition. I.e. first, next, row
+     */
+    const std::experimental::optional<clustering_key>& get_clustering_key() const {
+        return _clustering_key;
+    }
+    /**
+     * Max remaining rows to fetch in total.
+     * I.e. initial row_limit - #rows returned so far.
+     */
+    uint32_t get_remaining() const {
+        return _remaining;
     }
 
-#if 0
-    private int serializedSize()
-    {
-        return 2 + partitionKey.remaining()
-             + 2 + cellName.remaining()
-             + 4;
-    }
-
-    @Override
-    public String toString()
-    {
-        return String.format("PagingState(key=%s, cellname=%s, remaining=%d", ByteBufferUtil.bytesToHex(partitionKey), ByteBufferUtil.bytesToHex(cellName), remaining);
-    }
-#endif
+    static ::shared_ptr<paging_state> deserialize(bytes_opt bytes);
+    bytes_opt serialize() const;
 };
 
 }

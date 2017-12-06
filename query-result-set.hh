@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -26,11 +26,10 @@
 #include "query-request.hh"
 #include "query-result.hh"
 #include "schema.hh"
+#include "mutation.hh"
 
 #include <experimental/optional>
 #include <stdexcept>
-
-#include <boost/any.hpp>
 
 namespace query {
 
@@ -57,33 +56,35 @@ public:
     bool has(const sstring& column_name) const {
         return _cells.count(column_name) > 0;
     }
-    // Look up a deserialized row cell value by column name.
+    // Look up a deserialized row cell value by column name; throws no_such_column on error
     const data_value&
-    get_data_value(const sstring& column_name) const throw (no_such_column) {
+    get_data_value(const sstring& column_name) const {
         auto it = _cells.find(column_name);
         if (it == _cells.end()) {
             throw no_such_column(column_name);
         }
         return it->second;
     }
-    // Look up a deserialized row cell value by column name.
+    // Look up a deserialized row cell value by column name; throws no_such_column on error.
     template<typename T>
     std::experimental::optional<T>
-    get(const sstring& column_name) const throw (no_such_column) {
-        auto&& value = get_data_value(column_name).value();
-        if (value.empty()) {
+    get(const sstring& column_name) const {
+        auto&& value = get_data_value(column_name);
+        if (value.is_null()) {
             return std::experimental::nullopt;
         }
-        return std::experimental::optional<T>{boost::any_cast<T>(value)};
+        return std::experimental::optional<T>{value_cast<T>(value)};
     }
+    // throws no_such_column or null_column_value on error
     template<typename T>
-    T get_nonnull(const sstring& column_name) const throw (no_such_column, null_column_value) {
+    T get_nonnull(const sstring& column_name) const {
         auto v = get<T>(column_name);
         if (v) {
             return *v;
         }
         throw null_column_value(column_name);
     }
+    const std::unordered_map<sstring, data_value>& cells() const { return _cells; }
     friend inline bool operator==(const result_set_row& x, const result_set_row& y);
     friend inline bool operator!=(const result_set_row& x, const result_set_row& y);
     friend std::ostream& operator<<(std::ostream& out, const result_set_row& row);
@@ -108,10 +109,12 @@ public:
     result_set(schema_ptr s, const std::vector<result_set_row>& rows)
         : _schema(std::move(s)), _rows{std::move(rows)}
     { }
+    explicit result_set(const mutation&);
     bool empty() const {
         return _rows.empty();
     }
-    const result_set_row& row(size_t idx) const throw (std::out_of_range) {
+    // throws std::out_of_range on error
+    const result_set_row& row(size_t idx) const {
         if (idx >= _rows.size()) {
             throw std::out_of_range("no such row in result set: " + std::to_string(idx));
         }

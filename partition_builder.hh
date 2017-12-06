@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -47,17 +47,17 @@ public:
         r.append_cell(id, atomic_cell_or_collection(cell));
     }
 
-    virtual void accept_static_cell(column_id id, collection_mutation::view collection) override {
+    virtual void accept_static_cell(column_id id, collection_mutation_view collection) override {
         row& r = _partition.static_row();
         r.append_cell(id, atomic_cell_or_collection(collection));
     }
 
-    virtual void accept_row_tombstone(clustering_key_prefix_view prefix, tombstone t) override {
-        _partition.apply_row_tombstone(_schema, prefix, t);
+    virtual void accept_row_tombstone(const range_tombstone& rt) override {
+        _partition.apply_row_tombstone(_schema, rt);
     }
 
-    virtual void accept_row(clustering_key_view key, tombstone deleted_at, const row_marker& rm) override {
-        deletable_row& r = _partition.clustered_row(_schema, key);
+    virtual void accept_row(position_in_partition_view key, const row_tombstone& deleted_at, const row_marker& rm, is_dummy dummy, is_continuous continuous) override {
+        deletable_row& r = _partition.clustered_row(_schema, key, dummy, continuous);
         r.apply(rm);
         r.apply(deleted_at);
         _current_row = &r;
@@ -68,7 +68,7 @@ public:
         r.append_cell(id, atomic_cell_or_collection(cell));
     }
 
-    virtual void accept_row_cell(column_id id, collection_mutation::view collection) override {
+    virtual void accept_row_cell(column_id id, collection_mutation_view collection) override {
         row& r = _current_row->cells();
         r.append_cell(id, atomic_cell_or_collection(collection));
     }

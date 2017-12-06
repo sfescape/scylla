@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -23,8 +23,54 @@
 #include <seastar/core/sstring.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/distributed.hh>
+#include "auth/service.hh"
 #include "db/config.hh"
 #include "database.hh"
+#include "log.hh"
 
-future<> init_storage_service(distributed<database>& db);
-future<> init_ms_fd_gossiper(sstring listen_address, db::seed_provider_type seed_provider, sstring cluster_name = "Test Cluster");
+extern logging::logger startlog;
+
+class bad_configuration_error : public std::exception {};
+
+void init_storage_service(distributed<database>& db, sharded<auth::service>&);
+void init_ms_fd_gossiper(sstring listen_address
+                , uint16_t storage_port
+                , uint16_t ssl_storage_port
+                , bool tcp_nodelay_inter_dc
+                , sstring ms_encrypt_what
+                , sstring ms_trust_store
+                , sstring ms_cert
+                , sstring ms_key
+                , sstring ms_tls_prio
+                , bool ms_client_auth
+                , sstring ms_compress
+                , db::seed_provider_type seed_provider
+                , sstring cluster_name = "Test Cluster"
+                , double phi = 8
+                , bool sltba = false);
+
+/**
+ * Very simplistic config registry. Allows hooking in a config object
+ * to the "main" sequence.
+ */
+class configurable {
+public:
+    configurable() {
+        // We auto register. Not that like cycle is assumed to be forever
+        // and scope should be managed elsewhere.
+        register_configurable(*this);
+    }
+    virtual ~configurable()
+    {}
+    // Hook to add command line options
+    virtual void append_options(boost::program_options::options_description_easy_init&)
+    {};
+    // Called after command line is parsed and db/config populated.
+    // Hooked config can for example take this oppurtunity to load any file(s).
+    virtual future<> initialize(const boost::program_options::variables_map&) {
+        return make_ready_future();
+    }
+
+private:
+    static void register_configurable(configurable &);
+};

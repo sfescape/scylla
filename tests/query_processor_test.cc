@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -19,7 +19,6 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#define BOOST_TEST_DYN_LINK
 
 #include <boost/range/irange.hpp>
 #include <boost/range/adaptors.hpp>
@@ -34,6 +33,7 @@
 #include "core/future-util.hh"
 #include "transport/messages/result_message.hh"
 #include "cql3/query_processor.hh"
+#include "cql3/untyped_result_set.hh"
 
 SEASTAR_TEST_CASE(test_execute_internal_insert) {
     return do_with_cql_env([] (auto& e) {

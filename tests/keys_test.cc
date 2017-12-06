@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -19,13 +19,18 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#define BOOST_TEST_DYN_LINK
 #define BOOST_TEST_MODULE core
 
 #include <boost/test/unit_test.hpp>
+#include <boost/range/algorithm/copy.hpp>
 #include "keys.hh"
 #include "schema.hh"
+#include "schema_builder.hh"
 #include "types.hh"
+
+#include "idl/keys.dist.hh"
+#include "serializer_impl.hh"
+#include "idl/keys.dist.impl.hh"
 
 BOOST_AUTO_TEST_CASE(test_key_is_prefixed_by) {
     schema s({}, "", "", {{"c1", bytes_type}}, {{"c2", bytes_type}, {"c3", bytes_type}, {"c4", bytes_type}}, {}, {}, utf8_type);
@@ -117,7 +122,7 @@ BOOST_AUTO_TEST_CASE(test_legacy_ordering_for_composite_keys) {
 BOOST_AUTO_TEST_CASE(test_conversions_between_view_and_wrapper) {
     schema s({}, "", "", {{"c1", bytes_type}}, {}, {}, {}, utf8_type);
 
-    auto key = partition_key::from_deeply_exploded(s, {bytes("value")});
+    auto key = partition_key::from_deeply_exploded(s, {data_value(bytes("value"))});
     partition_key_view key_view = key;
 
     BOOST_REQUIRE(key_view.equal(s, key));
@@ -129,4 +134,24 @@ BOOST_AUTO_TEST_CASE(test_conversions_between_view_and_wrapper) {
     BOOST_REQUIRE(key.equal(s, key2));
 
     BOOST_REQUIRE(*key.begin(s) == bytes("value"));
+}
+
+template<typename T>
+inline
+T reserialize(const T& v) {
+    auto buf = ser::serialize_to_buffer<bytes>(v);
+    auto in = ser::as_input_stream(buf);
+    return ser::deserialize(in, boost::type<T>());
+}
+
+BOOST_AUTO_TEST_CASE(test_serialization) {
+    auto s = schema_builder("ks", "cf")
+            .with_column("pk", bytes_type, column_kind::partition_key)
+            .with_column("v", bytes_type)
+            .build();
+
+    auto pk_value = bytes("value");
+    partition_key key(std::vector<bytes>({pk_value}));
+
+    BOOST_REQUIRE(key.equal(*s, reserialize(key)));
 }

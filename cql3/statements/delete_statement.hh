@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -42,6 +42,7 @@
 #pragma once
 
 #include "cql3/statements/modification_statement.hh"
+#include "cql3/statements/raw/modification_statement.hh"
 #include "cql3/attributes.hh"
 #include "cql3/operation.hh"
 #include "database_fwd.hh"
@@ -55,15 +56,13 @@ namespace statements {
 */
 class delete_statement : public modification_statement {
 public:
-    delete_statement(statement_type type, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs)
-            : modification_statement{type, bound_terms, std::move(s), std::move(attrs)}
-    { }
+    delete_statement(statement_type type, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, cql_stats& stats);
 
-    virtual bool require_full_clustering_key() const override {
-        return false;
-    }
+    virtual bool require_full_clustering_key() const override;
 
-    virtual void add_update_for_key(mutation& m, const exploded_clustering_prefix& prefix, const update_parameters& params) override;
+    virtual bool allow_clustering_key_slices() const override;
+
+    virtual void add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params) override;
 
 #if 0
     protected void validateWhereClauseForConditions() throws InvalidRequestException
@@ -83,26 +82,6 @@ public:
 
     }
 #endif
-
-    class parsed : public modification_statement::parsed {
-    private:
-        std::vector<::shared_ptr<operation::raw_deletion>> _deletions;
-        std::vector<::shared_ptr<relation>> _where_clause;
-    public:
-        parsed(::shared_ptr<cf_name> name,
-               ::shared_ptr<attributes::raw> attrs,
-               std::vector<::shared_ptr<operation::raw_deletion>> deletions,
-               std::vector<::shared_ptr<relation>> where_clause,
-               conditions_vector conditions,
-               bool if_exists)
-            : modification_statement::parsed(std::move(name), std::move(attrs), std::move(conditions), false, if_exists)
-            , _deletions(std::move(deletions))
-            , _where_clause(std::move(where_clause))
-        { }
-    protected:
-        virtual ::shared_ptr<modification_statement> prepare_internal(database& db, schema_ptr schema,
-            ::shared_ptr<variable_specifications> bound_names, std::unique_ptr<attributes> attrs);
-    };
 };
 
 }

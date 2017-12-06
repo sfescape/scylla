@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -25,6 +25,8 @@
 #include "writetime_or_ttl.hh"
 #include "selector_factories.hh"
 #include "cql3/functions/functions.hh"
+#include "cql3/functions/castas_fcts.hh"
+#include "cql3/functions/aggregate_fcts.hh"
 #include "abstract_function_selector.hh"
 #include "writetime_or_ttl_selector.hh"
 
@@ -50,6 +52,11 @@ selectable::writetime_or_ttl::new_selector_factory(database& db, schema_ptr s, s
     }
 
     return writetime_or_ttl_selector::new_factory(def->name_as_text(), add_and_get_index(*def, defs), _is_writetime);
+}
+
+sstring
+selectable::writetime_or_ttl::to_string() const {
+    return sprint("%s(%s)", _is_writetime ? "writetime" : "ttl", _id->to_string());
 }
 
 shared_ptr<selectable>
@@ -78,6 +85,11 @@ selectable::with_function::new_selector_factory(database& db, schema_ptr s, std:
     return abstract_function_selector::new_factory(std::move(fun), std::move(factories));
 }
 
+sstring
+selectable::with_function::to_string() const {
+    return sprint("%s(%s)", _function_name.name, join(", ", _args));
+}
+
 shared_ptr<selectable>
 selectable::with_function::raw::prepare(schema_ptr s) {
         std::vector<shared_ptr<selectable>> prepared_args;
@@ -93,6 +105,13 @@ selectable::with_function::raw::processes_selection() const {
     return true;
 }
 
+shared_ptr<selectable::with_function::raw>
+selectable::with_function::raw::make_count_rows_function() {
+    return ::make_shared<cql3::selection::selectable::with_function::raw>(
+            cql3::functions::function_name::native_function(cql3::functions::aggregate_fcts::COUNT_ROWS_FUNCTION_NAME),
+                    std::vector<shared_ptr<cql3::selection::selectable::raw>>());
+}
+
 shared_ptr<selector::factory>
 selectable::with_field_selection::new_selector_factory(database& db, schema_ptr s, std::vector<const column_definition*>& defs) {
     auto&& factory = _selected->new_selector_factory(db, s, defs);
@@ -101,7 +120,7 @@ selectable::with_field_selection::new_selector_factory(database& db, schema_ptr 
     if (!ut) {
         throw exceptions::invalid_request_exception(
                 sprint("Invalid field selection: %s of type %s is not a user type",
-                       "FIXME: selectable" /* FIMXME: _selected */, ut->as_cql3_type()));
+                       _selected->to_string(), factory->new_instance()->get_type()->as_cql3_type()));
     }
     for (size_t i = 0; i < ut->size(); ++i) {
         if (ut->field_name(i) != _field->bytes_) {
@@ -110,7 +129,12 @@ selectable::with_field_selection::new_selector_factory(database& db, schema_ptr 
         return field_selector::new_factory(std::move(ut), i, std::move(factory));
     }
     throw exceptions::invalid_request_exception(sprint("%s of type %s has no field %s",
-                                                       "FIXME: selectable" /* FIXME: _selected */, ut->as_cql3_type(), _field));
+                                                       _selected->to_string(), ut->as_cql3_type(), _field));
+}
+
+sstring
+selectable::with_field_selection::to_string() const {
+    return sprint("%s.%s", _selected->to_string(), _field->to_string());
 }
 
 shared_ptr<selectable>
@@ -124,6 +148,34 @@ selectable::with_field_selection::raw::prepare(schema_ptr s) {
 bool
 selectable::with_field_selection::raw::processes_selection() const {
     return true;
+}
+
+shared_ptr<selector::factory>
+selectable::with_cast::new_selector_factory(database& db, schema_ptr s, std::vector<const column_definition*>& defs) {
+    std::vector<shared_ptr<selectable>> args{_arg};
+    auto&& factories = selector_factories::create_factories_and_collect_column_definitions(args, db, s, defs);
+    auto&& fun = functions::castas_functions::get(_type->get_type(), factories->new_instances(), s);
+
+    return abstract_function_selector::new_factory(std::move(fun), std::move(factories));
+}
+
+sstring
+selectable::with_cast::to_string() const {
+    return sprint("cast(%s as %s)", _arg->to_string(), _type->to_string());
+}
+
+shared_ptr<selectable>
+selectable::with_cast::raw::prepare(schema_ptr s) {
+    return ::make_shared<selectable::with_cast>(_arg->prepare(s), _type);
+}
+
+bool
+selectable::with_cast::raw::processes_selection() const {
+    return true;
+}
+
+std::ostream & operator<<(std::ostream &os, const selectable& s) {
+    return os << s.to_string();
 }
 
 }

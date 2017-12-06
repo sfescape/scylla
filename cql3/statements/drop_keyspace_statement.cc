@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -40,6 +40,7 @@
  */
 
 #include "cql3/statements/drop_keyspace_statement.hh"
+#include "cql3/statements/prepared_statement.hh"
 
 #include "service/migration_manager.hh"
 #include "transport/event.hh"
@@ -54,12 +55,9 @@ drop_keyspace_statement::drop_keyspace_statement(const sstring& keyspace, bool i
 {
 }
 
-void drop_keyspace_statement::check_access(const service::client_state& state)
+future<> drop_keyspace_statement::check_access(const service::client_state& state)
 {
-    warn(unimplemented::cause::AUTH);
-#if 0
-    state.hasKeyspaceAccess(keyspace, Permission.DROP);
-#endif
+    return state.has_keyspace_access(keyspace(), auth::permission::DROP);
 }
 
 void drop_keyspace_statement::validate(distributed<service::storage_proxy>&, const service::client_state& state)
@@ -75,29 +73,29 @@ const sstring& drop_keyspace_statement::keyspace() const
     return _keyspace;
 }
 
-future<bool> drop_keyspace_statement::announce_migration(distributed<service::storage_proxy>& proxy, bool is_local_only)
+future<shared_ptr<cql_transport::event::schema_change>> drop_keyspace_statement::announce_migration(distributed<service::storage_proxy>& proxy, bool is_local_only)
 {
-    return make_ready_future<>().then([&] {
+    return make_ready_future<>().then([this, is_local_only] {
         return service::get_local_migration_manager().announce_keyspace_drop(_keyspace, is_local_only);
     }).then_wrapped([this] (auto&& f) {
         try {
             f.get();
-            return true;
+            using namespace cql_transport;
+            return make_shared<event::schema_change>(
+                    event::schema_change::change_type::DROPPED,
+                    this->keyspace());
         } catch (const exceptions::configuration_exception& e) {
             if (_if_exists) {
-                return false;
+                return ::shared_ptr<cql_transport::event::schema_change>();
             }
             throw e;
         }
     });
 }
 
-shared_ptr<transport::event::schema_change> drop_keyspace_statement::change_event()
-{
-    using namespace transport;
-
-    return make_shared<event::schema_change>(event::schema_change::change_type::DROPPED, keyspace());
-
+std::unique_ptr<cql3::statements::prepared_statement>
+drop_keyspace_statement::prepare(database& db, cql_stats& stats) {
+    return std::make_unique<prepared_statement>(make_shared<drop_keyspace_statement>(*this));
 }
 
 }

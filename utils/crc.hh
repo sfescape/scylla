@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -23,6 +23,8 @@
 
 #include <cstdint>
 #include <smmintrin.h>
+
+namespace utils {
 
 class crc32 {
     uint32_t _r = 0;
@@ -95,3 +97,5 @@ public:
         return _r;
     }
 };
+
+}

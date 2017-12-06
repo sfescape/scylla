@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -20,9 +20,10 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "core/reactor.hh"
-#include "core/app-template.hh"
-#include "core/sstring.hh"
+#include <core/reactor.hh>
+#include <core/app-template.hh>
+#include <seastar/core/sstring.hh>
+#include <seastar/rpc/rpc_types.hh>
 #include "message/messaging_service.hh"
 #include "gms/gossip_digest_syn.hh"
 #include "gms/gossip_digest_ack.hh"
@@ -31,7 +32,7 @@
 #include "api/api.hh"
 
 using namespace std::chrono_literals;
-using namespace net;
+using namespace netw;
 
 class tester {
 private:
@@ -42,11 +43,11 @@ public:
     tester()
        : ms(get_local_messaging_service()) {
     }
-    using shard_id = net::messaging_service::shard_id;
+    using msg_addr = netw::messaging_service::msg_addr;
     using inet_address = gms::inet_address;
     using endpoint_state = gms::endpoint_state;
-    shard_id get_shard_id() {
-        return shard_id{_server, _cpuid};
+    msg_addr get_msg_addr() {
+        return msg_addr{_server, _cpuid};
     }
     void set_server_ip(sstring ip) {
         _server = inet_address(ip);
@@ -57,10 +58,13 @@ public:
     future<> stop() {
         return make_ready_future<>();
     }
+    promise<> digest_test_done;
 public:
     void init_handler() {
-        ms.register_gossip_digest_syn([] (gms::gossip_digest_syn msg) {
+        ms.register_gossip_digest_syn([this] (const rpc::client_info& cinfo, gms::gossip_digest_syn msg) {
             print("Server got syn msg = %s\n", msg);
+
+            auto from = netw::messaging_service::get_source(cinfo);
             auto ep1 = inet_address("1.1.1.1");
             auto ep2 = inet_address("2.2.2.2");
             int32_t gen = 800;
@@ -74,7 +78,26 @@ public:
                 {ep2, endpoint_state()},
             };
             gms::gossip_digest_ack ack(std::move(digests), std::move(eps));
-            return make_ready_future<gms::gossip_digest_ack>(std::move(ack));
+            ms.send_gossip_digest_ack(from, std::move(ack)).handle_exception([] (auto ep) {
+                print("Fail to send ack : %s", ep);
+            });
+            return messaging_service::no_wait();
+        });
+
+        ms.register_gossip_digest_ack([this] (const rpc::client_info& cinfo, gms::gossip_digest_ack msg) {
+            print("Server got ack msg = %s\n", msg);
+            auto from = netw::messaging_service::get_source(cinfo);
+            // Prepare gossip_digest_ack2 message
+            auto ep1 = inet_address("3.3.3.3");
+            std::map<inet_address, endpoint_state> eps{
+                {ep1, endpoint_state()},
+            };
+            gms::gossip_digest_ack2 ack2(std::move(eps));
+            ms.send_gossip_digest_ack2(from, std::move(ack2)).handle_exception([] (auto ep) {
+                print("Fail to send ack2 : %s", ep);
+            });
+            digest_test_done.set_value();
+            return messaging_service::no_wait();
         });
 
         ms.register_gossip_digest_ack2([] (gms::gossip_digest_ack2 msg) {
@@ -87,8 +110,8 @@ public:
             return messaging_service::no_wait();
         });
 
-        ms.register_echo([] {
-            print("Server got echo msg\n");
+        ms.register_gossip_echo([] {
+            print("Server got gossip echo msg\n");
             throw std::runtime_error("I'm throwing runtime_error exception");
             return make_ready_future<>();
         });
@@ -98,7 +121,7 @@ public:
     future<> test_gossip_digest() {
         print("=== %s ===\n", __func__);
         // Prepare gossip_digest_syn message
-        auto id = get_shard_id();
+        auto id = get_msg_addr();
         auto ep1 = inet_address("1.1.1.1");
         auto ep2 = inet_address("2.2.2.2");
         int32_t gen = 100;
@@ -108,24 +131,14 @@ public:
             {ep2, gen++, ver++},
         };
         gms::gossip_digest_syn syn("my_cluster", "my_partition", digests);
-        return ms.send_gossip_digest_syn(id, std::move(syn)).then([this, id] (gms::gossip_digest_ack ack) {
-            print("Client sent gossip_digest_syn got gossip_digest_ack reply = %s\n", ack);
-            // Prepare gossip_digest_ack2 message
-            auto ep1 = inet_address("3.3.3.3");
-            std::map<inet_address, endpoint_state> eps{
-                {ep1, endpoint_state()},
-            };
-            gms::gossip_digest_ack2 ack2(std::move(eps));
-            return ms.send_gossip_digest_ack2(id, std::move(ack2)).then([] () {
-                print("Client sent gossip_digest_ack2 got reply = void\n");
-                return make_ready_future<>();
-            });
+        return ms.send_gossip_digest_syn(id, std::move(syn)).then([this] {
+            return digest_test_done.get_future();
         });
     }
 
     future<> test_gossip_shutdown() {
         print("=== %s ===\n", __func__);
-        auto id = get_shard_id();
+        auto id = get_msg_addr();
         inet_address from("127.0.0.1");
         return ms.send_gossip_shutdown(id, from).then([] () {
             print("Client sent gossip_shutdown got reply = void\n");
@@ -135,8 +148,8 @@ public:
 
     future<> test_echo() {
         print("=== %s ===\n", __func__);
-        auto id = get_shard_id();
-        return ms.send_echo(id).then_wrapped([] (auto&& f) {
+        auto id = get_msg_addr();
+        return ms.send_gossip_echo(id).then_wrapped([] (auto&& f) {
             try {
                 f.get();
                 return make_ready_future<>();
@@ -169,10 +182,11 @@ int main(int ac, char ** av) {
             api_port++;
         }
         const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
-        net::get_messaging_service().start(listen).then([config, api_port, stay_alive] () {
+        utils::fb_utilities::set_broadcast_address(listen);
+        netw::get_messaging_service().start(listen).then([config, api_port, stay_alive] () {
             auto testers = new distributed<tester>;
             testers->start().then([testers]{
-                auto& server = net::get_local_messaging_service();
+                auto& server = netw::get_local_messaging_service();
                 auto port = server.port();
                 std::cout << "Messaging server listening on port " << port << " ...\n";
                 return testers->invoke_on_all(&tester::init_handler);
@@ -198,7 +212,7 @@ int main(int ac, char ** av) {
                     print("=============TEST DONE===========\n");
                     testers->stop().then([testers] {
                         delete testers;
-                        net::get_messaging_service().stop().then([]{
+                        netw::get_messaging_service().stop().then([]{
                             engine().exit(0);
                         });
                     });

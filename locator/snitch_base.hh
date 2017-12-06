@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -46,6 +46,7 @@
 #include "core/thread.hh"
 #include "core/distributed.hh"
 #include "utils/class_registrator.hh"
+#include "log.hh"
 
 namespace locator {
 
@@ -102,7 +103,10 @@ public:
      * called after Gossiper instance exists immediately before it starts
      * gossiping
      */
-    virtual void gossiper_starting() = 0;
+    virtual future<> gossiper_starting() {
+        _gossip_started = true;
+        return make_ready_future<>();
+    }
 
     /**
      * Returns whether for a range query doing a query against merged is likely
@@ -116,7 +120,11 @@ public:
 
     virtual ~i_endpoint_snitch() { assert(_state == snitch_state::stopped); };
 
-    virtual future<> stop() = 0;
+    // noop by default
+    virtual future<> stop() {
+        _state = snitch_state::stopped;
+        return make_ready_future<>();
+    }
 
     // noop by default
     virtual future<> pause_io() {
@@ -138,11 +146,14 @@ public:
     // noop by default
     virtual void set_my_dc(const sstring& new_dc) {};
     virtual void set_my_rack(const sstring& new_rack) {};
+    virtual void set_prefer_local(bool prefer_local) {};
+    virtual void set_local_private_addr(const sstring& addr_str) {};
 
     static distributed<snitch_ptr>& snitch_instance() {
-        static distributed<snitch_ptr> snitch_inst;
+        // FIXME: leaked intentionally to avoid shutdown problems, see #293
+        static distributed<snitch_ptr>* snitch_inst = new distributed<snitch_ptr>();
 
-        return snitch_inst;
+        return *snitch_inst;
     }
 
     static snitch_ptr& get_local_snitch_ptr() {
@@ -160,15 +171,26 @@ public:
         //noop by default
     }
 
+    bool local_gossiper_started() {
+        return _gossip_started;
+    }
+
+    virtual void reload_gossiper_state() {
+        // noop by default
+    }
+
 protected:
+    static logging::logger& logger() {
+        static logging::logger snitch_logger("snitch_logger");
+        return snitch_logger;
+    }
+
     static unsigned& io_cpu_id() {
         static unsigned id = 0;
         return id;
     }
 
 protected:
-    static logging::logger snitch_logger;
-
     enum class snitch_state {
         initializing,
         running,
@@ -177,6 +199,7 @@ protected:
         stopping,
         stopped
     } _state = snitch_state::initializing;
+    bool _gossip_started = false;
 };
 
 struct snitch_ptr {
@@ -250,7 +273,7 @@ future<> i_endpoint_snitch::init_snitch_obj(
                 s->set_my_distributed(&snitch_obj);
                 local_inst = std::move(s);
             } catch (no_such_class& e) {
-                snitch_logger.error("Can't create snitch {}: not supported", snitch_name);
+                logger().error("Can't create snitch {}: not supported", snitch_name);
                 throw;
             } catch (...) {
                 throw;
@@ -398,9 +421,6 @@ public:
     virtual int compare_endpoints(
         inet_address& address, inet_address& a1, inet_address& a2) override;
 
-    // noop by default
-    virtual void gossiper_starting() override {}
-
     virtual bool is_worth_merging_for_range_query(
         std::vector<inet_address>& merged,
         std::vector<inet_address>& l1,
@@ -412,6 +432,7 @@ private:
 protected:
     sstring _my_dc;
     sstring _my_rack;
+    bool _prefer_local = false;
 };
 
 } // namespace locator

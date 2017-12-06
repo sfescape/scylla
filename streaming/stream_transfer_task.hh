@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -40,14 +40,14 @@
 
 #include "utils/UUID.hh"
 #include "streaming/stream_task.hh"
-#include "streaming/messages/outgoing_file_message.hh"
 #include "streaming/stream_detail.hh"
-#include "sstables/sstables.hh"
 #include <map>
+#include <seastar/core/semaphore.hh>
 
 namespace streaming {
 
 class stream_session;
+class send_info;
 
 /**
  * StreamTransferTask sends sections of SSTable files in certain ColumnFamily.
@@ -56,101 +56,31 @@ class stream_transfer_task : public stream_task {
 private:
     int32_t sequence_number = 0;
     bool aborted = false;
-
-    std::map<int32_t, messages::outgoing_file_message> files;
-    //final Map<Integer, ScheduledFuture> timeoutTasks = new HashMap<>();
-
-    long total_size;
+    // A stream_transfer_task always contains the same range to stream
+    dht::token_range_vector _ranges;
+    std::map<unsigned, dht::partition_range_vector> _shard_ranges;
+    long _total_size;
 public:
     using UUID = utils::UUID;
     stream_transfer_task(stream_transfer_task&&) = default;
-    stream_transfer_task(shared_ptr<stream_session> session, UUID cf_id);
+    stream_transfer_task(shared_ptr<stream_session> session, UUID cf_id, dht::token_range_vector ranges, long total_size = 0);
     ~stream_transfer_task();
-
-    void add_transfer_file(stream_detail detail);
-
-    /**
-     * Received ACK for file at {@code sequenceNumber}.
-     *
-     * @param sequenceNumber sequence number of file
-     */
-    void complete(int sequence_number);
-
 public:
     virtual void abort() override {
-#if 0
-        if (aborted)
-            return;
-        aborted = true;
-
-        for (ScheduledFuture future : timeoutTasks.values())
-            future.cancel(false);
-        timeoutTasks.clear();
-
-        for (OutgoingFileMessage file : files.values())
-            file.sstable.releaseReference();
-#endif
     }
 
     virtual int get_total_number_of_files() override {
-        return files.size();
+        return 1;
     }
 
     virtual long get_total_size() override {
-        return total_size;
+        return _total_size;
     }
 
-    std::map<int32_t, messages::outgoing_file_message>& get_file_messages() {
-        return files;
-    }
-
-    messages::outgoing_file_message& create_message_for_retry(int sequence_number) {
-#if 0
-        // remove previous time out task to be rescheduled later
-        ScheduledFuture future = timeoutTasks.remove(sequenceNumber);
-        if (future != null)
-            future.cancel(false);
-#endif
-        auto it = files.find(sequence_number);
-        assert(it != files.end());
-        return it->second;
-    }
-
-#if 0
-    /**
-     * Schedule timeout task to release reference for file sent.
-     * When not receiving ACK after sending to receiver in given time,
-     * the task will release reference.
-     *
-     * @param sequenceNumber sequence number of file sent.
-     * @param time time to timeout
-     * @param unit unit of given time
-     * @return scheduled future for timeout task
-     */
-    public synchronized ScheduledFuture scheduleTimeout(final int sequenceNumber, long time, TimeUnit unit)
-    {
-        if (!files.containsKey(sequenceNumber))
-            return null;
-
-        ScheduledFuture future = timeoutExecutor.schedule(new Runnable()
-        {
-            public void run()
-            {
-                synchronized (StreamTransferTask.this)
-                {
-                    // remove so we don't cancel ourselves
-                    timeoutTasks.remove(sequenceNumber);
-                    StreamTransferTask.this.complete(sequenceNumber);
-                }
-            }
-        }, time, unit);
-
-        ScheduledFuture prev = timeoutTasks.put(sequenceNumber, future);
-        assert prev == null;
-        return future;
-    }
-#endif
     void start();
+
+    void append_ranges(const dht::token_range_vector& ranges);
+    void sort_and_merge_ranges();
 };
 
 } // namespace streaming

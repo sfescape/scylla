@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -182,6 +182,13 @@ protected:
     virtual shared_ptr<restrictions::restriction> new_contains_restriction(database& db, schema_ptr schema,
                                                                            shared_ptr<variable_specifications> bound_names, bool is_key) override {
         throw exceptions::invalid_request_exception(sprint("%s cannot be used for Multi-column relations", get_operator()));
+    }
+
+    virtual ::shared_ptr<relation> maybe_rename_identifier(const column_identifier::raw& from, column_identifier::raw to) override {
+        auto new_entities = boost::copy_range<decltype(_entities)>(_entities | boost::adaptors::transformed([&] (auto&& entity) {
+            return *entity == from ? ::make_shared<column_identifier::raw>(to) : entity;
+        }));
+        return ::make_shared(multi_column_relation(std::move(new_entities), _relation_type, _values_or_marker, _in_values, _in_marker));
     }
 
     virtual shared_ptr<term> to_term(const std::vector<shared_ptr<column_specification>>& receivers,

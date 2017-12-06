@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -38,7 +38,6 @@
 
 #pragma once
 
-#include "types.hh"
 #include "core/sstring.hh"
 #include "utils/serialization.hh"
 #include "gms/gossip_digest.hh"
@@ -72,16 +71,17 @@ public:
         return _partioner;
     }
 
-    std::vector<gossip_digest> get_gossip_digests() {
-        return _digests;
+    sstring get_cluster_id() const {
+        return cluster_id();
     }
 
-    // The following replaces GossipDigestSynSerializer from the Java code
-    void serialize(bytes::iterator& out) const;
+    sstring get_partioner() const {
+        return partioner();
+    }
 
-    static gossip_digest_syn deserialize(bytes_view& v);
-
-    size_t serialized_size() const;
+    std::vector<gossip_digest> get_gossip_digests() const {
+        return _digests;
+    }
 
     friend std::ostream& operator<<(std::ostream& os, const gossip_digest_syn& syn);
 };

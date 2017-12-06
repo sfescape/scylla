@@ -16,9 +16,9 @@
  * limitations under the License.
  */
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -73,11 +73,11 @@ public:
         return _column_definitions;
     }
 
-#if 0
-    bool has_supporting_index(::shared_ptr<secondary_index_manager> index_manager) const override {
+    virtual bool has_supporting_index(const secondary_index::secondary_index_manager& index_manager) const override {
         return false;
     }
 
+#if 0
     void add_index_expression_to(std::vector<::shared_ptr<index_expression>>& expressions,
                                          const query_options& options) override {
         throw exceptions::unsupported_operation_exception();
@@ -97,7 +97,14 @@ public:
             if (!buf) {
                 throw exceptions::invalid_request_exception("Invalid null token value");
             }
-            return dht::token(dht::token::kind::key, *buf);
+            auto tk = dht::global_partitioner().from_bytes(*buf);
+            if (tk.is_minimum() && !is_start(b)) {
+                // The token was parsed as a minimum marker (token::kind::before_all_keys), but
+                // as it appears in the end bound position, it is actually the maximum marker
+                // (token::kind::after_all_keys).
+                return dht::maximum_token();
+            }
+            return tk;
         };
 
         const auto start_token = get_token_bound(statements::bound::START);
@@ -150,7 +157,7 @@ public:
     }
 
     bool uses_function(const sstring& ks_name, const sstring& function_name) const override {
-        return abstract_restriction::uses_function(_value, ks_name, function_name);
+        return abstract_restriction::term_uses_function(_value, ks_name, function_name);
     }
 
     void merge_with(::shared_ptr<restriction>) override {
@@ -166,6 +173,13 @@ public:
     sstring to_string() const override {
         return sprint("EQ(%s)", _value->to_string());
     }
+
+    virtual bool is_satisfied_by(const schema& schema,
+                                 const partition_key& key,
+                                 const clustering_key_prefix& ckey,
+                                 const row& cells,
+                                 const query_options& options,
+                                 gc_clock::time_point now) const override;
 };
 
 class token_restriction::slice final : public token_restriction {
@@ -196,11 +210,11 @@ public:
     bool uses_function(const sstring& ks_name,
             const sstring& function_name) const override {
         return (_slice.has_bound(statements::bound::START)
-                && abstract_restriction::uses_function(
+                && abstract_restriction::term_uses_function(
                         _slice.bound(statements::bound::START), ks_name,
                         function_name))
                 || (_slice.has_bound(statements::bound::END)
-                        && abstract_restriction::uses_function(
+                        && abstract_restriction::term_uses_function(
                                 _slice.bound(statements::bound::END),
                                 ks_name, function_name));
     }
@@ -239,6 +253,13 @@ public:
     sstring to_string() const override {
         return sprint("SLICE%s", _slice);
     }
+
+    virtual bool is_satisfied_by(const schema& schema,
+                                 const partition_key& key,
+                                 const clustering_key_prefix& ckey,
+                                 const row& cells,
+                                 const query_options& options,
+                                 gc_clock::time_point now) const override;
 };
 
 }

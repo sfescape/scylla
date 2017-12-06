@@ -16,12 +16,12 @@
 # limitations under the License.
 
 #
-# Copyright 2014, Cloudius Systems
+# Copyright (C) 2014 ScyllaDB
 #
 
 #
 # This file has been modified from the Apache distribution
-# by Cloudius Systems
+# by ScyllaDB
 #
 
 
@@ -34,7 +34,7 @@
 #
 
 namespace java org.apache.cassandra.thrift
-namespace cpp org.apache.cassandra
+namespace cpp cassandra
 namespace csharp Apache.Cassandra
 namespace py cassandra
 namespace php cassandra

@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -26,9 +26,9 @@
 #include <initializer_list>
 
 #include "utils/serialization.hh"
+#include "types.hh"
 
 #define BOOST_TEST_MODULE test-serialization
-#define BOOST_TEST_DYN_LINK
 #include <boost/test/unit_test.hpp>
 
 void show(std::stringstream &ss) {
@@ -45,31 +45,47 @@ void show(std::stringstream &ss) {
 // is rotten" type of translation :-)
 int8_t back_and_forth_8(int8_t a) {
     std::stringstream buf;
-    serialize_int8(buf, a);
-    return deserialize_int8(buf);
+    auto it = std::ostream_iterator<char>(buf);
+    serialize_int8(it, a);
+    auto str = buf.str();
+    auto bview = bytes_view(reinterpret_cast<const int8_t*>(str.data()), 1);
+    return read_simple<uint8_t>(bview);
 }
 int16_t back_and_forth_16(int16_t a) {
     std::stringstream buf;
-    serialize_int16(buf, a);
-    return deserialize_int16(buf);
+    auto it = std::ostream_iterator<char>(buf);
+    serialize_int16(it, a);
+    auto str = buf.str();
+    auto bview = bytes_view(reinterpret_cast<const int8_t*>(str.data()), 2);
+    return read_simple<uint16_t>(bview);
 }
 int32_t back_and_forth_32(int32_t a) {
     std::stringstream buf;
-    serialize_int32(buf, a);
-    return deserialize_int32(buf);
+    auto it = std::ostream_iterator<char>(buf);
+    serialize_int32(it, a);
+    auto str = buf.str();
+    auto bview = bytes_view(reinterpret_cast<const int8_t*>(str.data()), 4);
+    return read_simple<uint32_t>(bview);
 }
 int64_t back_and_forth_64(int64_t a) {
     std::stringstream buf;
-    serialize_int64(buf, a);
-    return deserialize_int64(buf);
+    auto it = std::ostream_iterator<char>(buf);
+    serialize_int64(it, a);
+    auto str = buf.str();
+    auto bview = bytes_view(reinterpret_cast<const int8_t*>(str.data()), 8);
+    return read_simple<uint64_t>(bview);
 }
 sstring back_and_forth_sstring(sstring a) {
     std::stringstream buf;
-    serialize_string(buf, a);
-    return deserialize_string(buf);
+    auto it = std::ostream_iterator<char>(buf);
+    serialize_string(it, a);
+    auto str = buf.str();
+    auto bview = bytes_view(reinterpret_cast<const int8_t*>(str.data()), str.size());
+    auto res = read_simple_short_string(bview);
+    sstring str_res = sstring(reinterpret_cast<const char*>(res.data()), res.size());
+    return str_res;
 }
 BOOST_AUTO_TEST_CASE(round_trip) {
-    std::stringstream out;
     BOOST_CHECK_EQUAL(back_and_forth_8('a'), 'a');
     BOOST_CHECK_EQUAL(back_and_forth_16(1), 1);
     BOOST_CHECK_EQUAL(back_and_forth_16(12345), 12345);
@@ -137,22 +153,28 @@ bool expect_bytes(std::stringstream &buf, std::initializer_list<unsigned char> c
 
 BOOST_AUTO_TEST_CASE(expected) {
     std::stringstream buf;
+    auto it = std::ostream_iterator<char>(buf);
 
-	serialize_int8(buf, 'a');
+	serialize_int8(it, 'a');
 	BOOST_CHECK(expect_bytes(buf, {97}));
 
-    serialize_int32(buf, 1234567);
+    it = std::ostream_iterator<char>(buf);
+    serialize_int32(it, 1234567);
     BOOST_CHECK(expect_bytes(buf, {0, 18, 214, 135}));
 
-    serialize_int16(buf, (uint16_t)12345);
+    it = std::ostream_iterator<char>(buf);
+    serialize_int16(it, (uint16_t)12345);
     BOOST_CHECK(expect_bytes(buf, {48, 57}));
 
-    serialize_int64(buf, 1234567890123UL);
+    it = std::ostream_iterator<char>(buf);
+    serialize_int64(it, 1234567890123UL);
     BOOST_CHECK(expect_bytes(buf, {0, 0, 1, 31, 113, 251, 4, 203}));
 
-    serialize_string(buf, "hello");
+    it = std::ostream_iterator<char>(buf);
+    serialize_string(it, "hello");
     BOOST_CHECK(expect_bytes(buf, {0, 5, 104, 101, 108, 108, 111}));
 
-    serialize_string(buf, sstring("hello"));
+    it = std::ostream_iterator<char>(buf);
+    serialize_string(it, sstring("hello"));
     BOOST_CHECK(expect_bytes(buf, {0, 5, 104, 101, 108, 108, 111}));
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -23,6 +23,7 @@
 #include "../sstable_test.hh"
 #include "sstables/sstables.hh"
 #include "mutation_reader.hh"
+#include "memtable-sstable.hh"
 #include <boost/accumulators/accumulators.hpp>
 #include <boost/accumulators/statistics.hpp>
 #include <boost/range/irange.hpp>
@@ -66,7 +67,7 @@ private:
     std::default_random_engine _generator;
     std::uniform_int_distribution<char> _distribution;
     lw_shared_ptr<memtable> _mt;
-    std::vector<lw_shared_ptr<sstable>> _sst;
+    std::vector<shared_sstable> _sst;
 
     schema_ptr create_schema() {
         std::vector<schema::column> columns;
@@ -101,23 +102,25 @@ public:
 
     future<> stop() { return make_ready_future<>(); }
 
-    void fill_memtable() {
-        for (unsigned i = 0; i < _cfg.partitions; i++) {
-            auto key = partition_key::from_deeply_exploded(*s, { boost::any(random_key()) });
-            auto mut = mutation(key, s);
-            for (auto& cdef: s->regular_columns()) {
-                mut.set_clustered_cell(clustering_key::make_empty(*s), cdef, atomic_cell::make_live(0, utf8_type->decompose(random_column())));
+    future<> fill_memtable() {
+        auto idx = boost::irange(0, int(_cfg.partitions));
+        return do_for_each(idx.begin(), idx.end(), [this] (auto iteration) {
+            auto key = partition_key::from_deeply_exploded(*s, { this->random_key() });
+            auto mut = mutation(key, this->s);
+            for (auto& cdef: this->s->regular_columns()) {
+                mut.set_clustered_cell(clustering_key::make_empty(), cdef, atomic_cell::make_live(0, utf8_type->decompose(this->random_column())));
             }
-            _mt->apply(std::move(mut));
-        }
+            this->_mt->apply(std::move(mut));
+            return make_ready_future<>();
+        });
     }
 
     future<> load_sstables(unsigned iterations) {
-        _sst.push_back(make_lw_shared<sstable>("ks", "cf", this->dir(), 0, sstable::version_types::ka, sstable::format_types::big));
+        _sst.push_back(make_sstable(s, this->dir(), 0, sstable::version_types::ka, sstable::format_types::big));
         return _sst.back()->load();
     }
 
-    using clk = std::chrono::high_resolution_clock;
+    using clk = std::chrono::steady_clock;
     static auto now() {
         return clk::now();
     }
@@ -125,13 +128,19 @@ public:
 
     // Mappers below
     future<double> flush_memtable(int idx) {
-        auto start = test_env::now();
-        size_t partitions = _mt->partition_count();
-        return test_setup::create_empty_test_dir(dir()).then([this, idx] {
-            auto sst = sstables::test::make_test_sstable(_cfg.buffer_size, "ks", "cf", dir(), idx, sstable::version_types::ka, sstable::format_types::big);
-            return sst->write_components(*_mt).then([sst] {});
-        }).then([start, partitions] {
+        return seastar::async([this, idx] {
+            storage_service_for_tests ssft;
+            size_t partitions = _mt->partition_count();
+
+            test_setup::create_empty_test_dir(dir()).get();
+            auto sst = sstables::test::make_test_sstable(_cfg.buffer_size, s, dir(), idx, sstable::version_types::ka, sstable::format_types::big);
+
+            auto start = test_env::now();
+            write_memtable_to_sstable(*_mt, sst).get();
             auto end = test_env::now();
+
+            _mt->revert_flushed_memory();
+
             auto duration = std::chrono::duration<double>(end - start).count();
             return partitions / duration;
         });
@@ -139,34 +148,27 @@ public:
 
     future<double> read_all_indexes(int idx) {
         return do_with(test(_sst[0]), [] (auto& sst) {
-            auto start = test_env::now();
-            auto total = make_lw_shared<size_t>(0);
-            auto& summary = sst.get_summary();
-            auto idx = boost::irange(0, int(summary.header.size));
+            const auto start = test_env::now();
 
-            return do_for_each(idx.begin(), idx.end(), [&sst, total] (uint64_t entry) {
-                return sst.read_indexes(entry).then([total] (auto il) {
-                    *total += il.size();
-                });
-            }).then([total, start] {
+            return sst.read_indexes().then([start] (const auto& indexes) {
                 auto end = test_env::now();
                 auto duration = std::chrono::duration<double>(end - start).count();
-                return *total / duration;
+                return indexes.size() / duration;
             });
         });
     }
 
     future<double> read_sequential_partitions(int idx) {
-        return do_with(_sst[0]->read_rows(s), [this] (sstables::mutation_reader& r) {
+        return do_with(_sst[0]->read_rows_flat(s), [this] (flat_mutation_reader& r) {
             auto start = test_env::now();
             auto total = make_lw_shared<size_t>(0);
             auto done = make_lw_shared<bool>(false);
             return do_until([done] { return *done; }, [this, done, total, &r] {
-                return r.read().then([this, done, total] (mutation_opt m) {
+                return read_mutation_from_flat_mutation_reader(s, r).then([this, done, total] (mutation_opt m) {
                     if (!m) {
                         *done = true;
                     } else {
-                        auto row = m->partition().find_row(clustering_key::make_empty(*s));
+                        auto row = m->partition().find_row(*s, clustering_key::make_empty());
                         if (!row || row->size() != _cfg.num_columns) {
                             throw std::invalid_argument("Invalid sstable found. Maybe you ran write mode with different num_columns settings?");
                         } else {

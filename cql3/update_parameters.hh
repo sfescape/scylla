@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -58,8 +58,10 @@ namespace cql3 {
  */
 class update_parameters final {
 public:
+    // Holder for data needed by CQL list updates which depend on current state of the list.
     struct prefetch_data {
         using key = std::pair<partition_key, clustering_key>;
+        using key_view = std::pair<partition_key_view, clustering_key_view>;
         struct key_hashing {
             partition_key::hashing pk_hash;
             clustering_key::hashing ck_hash;
@@ -70,6 +72,10 @@ public:
             { }
 
             size_t operator()(const key& k) const {
+                return pk_hash(k.first) ^ ck_hash(k.second);
+            }
+
+            size_t operator()(const key_view& k) const {
                 return pk_hash(k.first) ^ ck_hash(k.second);
             }
         };
@@ -85,8 +91,19 @@ public:
             bool operator()(const key& k1, const key& k2) const {
                 return pk_eq(k1.first, k2.first) && ck_eq(k1.second, k2.second);
             }
+            bool operator()(const key_view& k1, const key& k2) const {
+                return pk_eq(k1.first, k2.first) && ck_eq(k1.second, k2.second);
+            }
+            bool operator()(const key& k1, const key_view& k2) const {
+                return pk_eq(k1.first, k2.first) && ck_eq(k1.second, k2.second);
+            }
         };
-        using row = std::unordered_map<column_id, collection_mutation::one>;
+        struct cell {
+            bytes key;
+            bytes value;
+        };
+        using cell_list = std::vector<cell>;
+        using row = std::unordered_map<column_id, cell_list>;
     public:
         std::unordered_map<key, row, key_hashing, key_equality> rows;
         schema_ptr schema;
@@ -139,13 +156,9 @@ public:
         }
     };
 
-#if 0
-     public Cell makeCounter(CellName name, long delta) throws InvalidRequestException
-     {
-         QueryProcessor.validateCellName(name, metadata.comparator);
-         return new BufferCounterUpdateCell(name, delta, FBUtilities.timestampMicros());
-     }
-#endif
+    atomic_cell make_counter_update_cell(int64_t delta) const {
+        return atomic_cell::make_live_counter_update(_timestamp, delta);
+    }
 
     tombstone make_tombstone() const {
         return {_timestamp, _local_deletion_time};
@@ -183,8 +196,11 @@ public:
         return _timestamp;
     }
 
-    std::experimental::optional<collection_mutation::view> get_prefetched_list(
-        const partition_key& pkey, const clustering_key& row_key, const column_definition& column) const;
+    const prefetch_data::cell_list*
+    get_prefetched_list(
+        partition_key_view pkey,
+        clustering_key_view ckey,
+        const column_definition& column) const;
 };
 
 }

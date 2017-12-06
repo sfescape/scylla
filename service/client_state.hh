@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -41,11 +41,17 @@
 
 #pragma once
 
+#include "auth/service.hh"
 #include "exceptions/exceptions.hh"
 #include "unimplemented.hh"
 #include "timestamp.hh"
 #include "db_clock.hh"
 #include "database.hh"
+#include "auth/authenticated_user.hh"
+#include "auth/authenticator.hh"
+#include "auth/permission.hh"
+#include "tracing/tracing.hh"
+#include "tracing/trace_state.hh"
 
 namespace service {
 
@@ -55,6 +61,8 @@ namespace service {
 class client_state {
 private:
     sstring _keyspace;
+    tracing::trace_state_ptr _trace_state_ptr;
+    lw_shared_ptr<utils::UUID> _tracing_session_id;
 #if 0
     private static final Logger logger = LoggerFactory.getLogger(ClientState.class);
     public static final SemanticVersion DEFAULT_CQL_VERSION = org.apache.cassandra.cql3.QueryProcessor.CQL_VERSION;
@@ -77,32 +85,80 @@ private:
     private volatile AuthenticatedUser user;
     private volatile String keyspace;
 #endif
-
-public:
-    struct internal_tag {};
-    struct external_tag {};
+    ::shared_ptr<auth::authenticated_user> _user;
 
     // isInternal is used to mark ClientState as used by some internal component
     // that should have an ability to modify system keyspace.
-    const bool _is_internal;
+    bool _is_internal;
+    bool _is_thrift;
 
     // The biggest timestamp that was returned by getTimestamp/assigned to a query
     api::timestamp_type _last_timestamp_micros = 0;
 
-    // Note: Origin passes here a RemoteAddress parameter, but it doesn't seem to be used
-    // anywhere so I didn't bother converting it.
-    client_state(external_tag) : _is_internal(false) {
-        warn(unimplemented::cause::AUTH);
-#if 0
-            if (!DatabaseDescriptor.getAuthenticator().requireAuthentication())
-                this.user = AuthenticatedUser.ANONYMOUS_USER;
-#endif
+    bool _dirty = false;
+
+    // Address of a client
+    socket_address _remote_address;
+
+    // Only populated for external client state.
+    auth::service* _auth_service{nullptr};
+public:
+    struct internal_tag {};
+    struct external_tag {};
+
+    void create_tracing_session(tracing::trace_type type, tracing::trace_state_props_set props) {
+        _trace_state_ptr = tracing::tracing::get_local_tracing_instance().create_session(type, props);
+        // store a session ID separately because its lifetime is not always
+        // coupled with the trace_state because the trace_state may already be
+        // destroyed when we need a session ID for a response to a client (e.g.
+        // in case of errors).
+        if (_trace_state_ptr) {
+            _tracing_session_id = make_lw_shared<utils::UUID>(_trace_state_ptr->session_id());
+        }
     }
 
-    client_state(internal_tag) : _keyspace("system"), _is_internal(true) {}
+    tracing::trace_state_ptr& get_trace_state() {
+        return _trace_state_ptr;
+    }
 
-    virtual bool is_thrift() const {
-        return false;
+    const tracing::trace_state_ptr& get_trace_state() const {
+        return _trace_state_ptr;
+    }
+
+    client_state(external_tag, auth::service& auth_service, const socket_address& remote_address = socket_address(), bool thrift = false)
+            : _is_internal(false)
+            , _is_thrift(thrift)
+            , _remote_address(remote_address)
+            , _auth_service(&auth_service) {
+        if (!auth_service.underlying_authenticator().require_authentication()) {
+            _user = ::make_shared<auth::authenticated_user>();
+        }
+    }
+
+    gms::inet_address get_client_address() const {
+        return gms::inet_address(_remote_address);
+    }
+
+    client_state(internal_tag) : _keyspace("system"), _is_internal(true), _is_thrift(false) {}
+
+    // `nullptr` for internal instances.
+    auth::service* get_auth_service() {
+        return _auth_service;
+    }
+
+    // See above.
+    const auth::service* get_auth_service() const {
+        return _auth_service;
+    }
+
+    void merge(const client_state& other);
+
+    bool is_thrift() const {
+        return _is_thrift;
+    }
+
+    bool is_internal() const {
+        return _is_internal;
     }
 
     /**
@@ -113,10 +169,15 @@ public:
     }
 
     /**
+     * The `auth::service` should be non-`nullptr` for native protocol users.
+     *
      * @return a ClientState object for external clients (thrift/native protocol users).
      */
-    static client_state for_external_calls() {
-        return client_state(external_tag());
+    static client_state for_external_calls(auth::service& ser) {
+        return client_state(external_tag(), ser);
+    }
+    static client_state for_external_thrift_calls(auth::service& ser) {
+        return client_state(external_tag(), ser, socket_address(), true);
     }
 
     /**
@@ -124,7 +185,7 @@ public:
      * in the sequence seen, even if multiple updates happen in the same millisecond.
      */
     api::timestamp_type get_timestamp() {
-        auto current = db_clock::now().time_since_epoch().count() * 1000;
+        auto current = api::new_timestamp();
         auto last = _last_timestamp_micros;
         auto result = last >= current ? last + 1 : current;
         _last_timestamp_micros = result;
@@ -162,13 +223,11 @@ public:
     void set_keyspace(seastar::sharded<database>& db, sstring keyspace) {
         // Skip keyspace validation for non-authenticated users. Apparently, some client libraries
         // call set_keyspace() before calling login(), and we have to handle that.
-#if 0
-        if (user && Schema.instance.getKSMetaData(ks) == null) {
-#endif
-        if (!db.local().has_keyspace(keyspace)) {
+        if (_user && !db.local().has_keyspace(keyspace)) {
             throw exceptions::invalid_request_exception(sprint("Keyspace '%s' does not exist", keyspace));
         }
         _keyspace = keyspace;
+        _dirty = true;
     }
 
     const sstring& get_keyspace() const {
@@ -178,100 +237,31 @@ public:
         return _keyspace;
     }
 
-#if 0
     /**
-     * Attempts to login the given user.
+     * Sets active user. Does _not_ validate anything
      */
-    public void login(AuthenticatedUser user) throws AuthenticationException
-    {
-        if (!user.isAnonymous() && !Auth.isExistingUser(user.getName()))
-           throw new AuthenticationException(String.format("User %s doesn't exist - create it with CREATE USER query first",
-                                                           user.getName()));
-        this.user = user;
-    }
+    void set_login(::shared_ptr<auth::authenticated_user>);
 
-    public void hasAllKeyspacesAccess(Permission perm) throws UnauthorizedException
-    {
-        if (isInternal)
-            return;
-        validateLogin();
-        ensureHasPermission(perm, DataResource.root());
-    }
+    /**
+     * Attempts to validate login for the set user.
+     */
+    future<> check_user_exists();
 
-    public void hasKeyspaceAccess(String keyspace, Permission perm) throws UnauthorizedException, InvalidRequestException
-    {
-        hasAccess(keyspace, perm, DataResource.keyspace(keyspace));
-    }
+    future<> has_all_keyspaces_access(auth::permission) const;
+    future<> has_keyspace_access(const sstring&, auth::permission) const;
+    future<> has_column_family_access(const sstring&, const sstring&, auth::permission) const;
+    future<> has_schema_access(const schema& s, auth::permission p) const;
 
-    public void hasColumnFamilyAccess(String keyspace, String columnFamily, Permission perm)
-    throws UnauthorizedException, InvalidRequestException
-    {
-        ThriftValidation.validateColumnFamily(keyspace, columnFamily);
-        hasAccess(keyspace, perm, DataResource.columnFamily(keyspace, columnFamily));
-    }
-
-    private void hasAccess(String keyspace, Permission perm, DataResource resource)
-    throws UnauthorizedException, InvalidRequestException
-    {
-        validateKeyspace(keyspace);
-        if (isInternal)
-            return;
-        validateLogin();
-        preventSystemKSSchemaModification(keyspace, resource, perm);
-        if ((perm == Permission.SELECT) && READABLE_SYSTEM_RESOURCES.contains(resource))
-            return;
-        if (PROTECTED_AUTH_RESOURCES.contains(resource))
-            if ((perm == Permission.CREATE) || (perm == Permission.ALTER) || (perm == Permission.DROP))
-                throw new UnauthorizedException(String.format("%s schema is protected", resource));
-        ensureHasPermission(perm, resource);
-    }
-
-    public void ensureHasPermission(Permission perm, IResource resource) throws UnauthorizedException
-    {
-        for (IResource r : Resources.chain(resource))
-            if (authorize(r).contains(perm))
-                return;
-
-        throw new UnauthorizedException(String.format("User %s has no %s permission on %s or any of its parents",
-                                                      user.getName(),
-                                                      perm,
-                                                      resource));
-    }
-
-    private void preventSystemKSSchemaModification(String keyspace, DataResource resource, Permission perm) throws UnauthorizedException
-    {
-        // we only care about schema modification.
-        if (!((perm == Permission.ALTER) || (perm == Permission.DROP) || (perm == Permission.CREATE)))
-            return;
-
-        // prevent system keyspace modification
-        if (SystemKeyspace.NAME.equalsIgnoreCase(keyspace))
-            throw new UnauthorizedException(keyspace + " keyspace is not user-modifiable.");
-
-        // we want to allow altering AUTH_KS and TRACING_KS.
-        Set<String> allowAlter = Sets.newHashSet(Auth.AUTH_KS, TraceKeyspace.NAME);
-        if (allowAlter.contains(keyspace.toLowerCase()) && !(resource.isKeyspaceLevel() && (perm == Permission.ALTER)))
-            throw new UnauthorizedException(String.format("Cannot %s %s", perm, resource));
-    }
-#endif
-
+private:
+    future<> has_access(const sstring&, auth::permission, auth::data_resource) const;
+    future<bool> check_has_permission(auth::permission, auth::data_resource) const;
 public:
-    void validate_login() const {
-        warn(unimplemented::cause::AUTH);
-#if 0
-        if (user == null)
-            throw new UnauthorizedException("You have not logged in");
-#endif
-    }
+    future<> ensure_has_permission(auth::permission, auth::data_resource) const;
+
+    void validate_login() const;
+    void ensure_not_anonymous() const; // unauthorized_exception on error
 
 #if 0
-    public void ensureNotAnonymous() throws UnauthorizedException
-    {
-        validateLogin();
-        if (user.isAnonymous())
-            throw new UnauthorizedException("You have to be logged in and not anonymous to perform this request");
-    }
-
     public void ensureIsSuper(String message) throws UnauthorizedException
     {
         if (DatabaseDescriptor.getAuthenticator().requireAuthentication() && (user == null || !user.isSuper()))
@@ -283,12 +273,13 @@ public:
         if (keyspace == null)
             throw new InvalidRequestException("You have not set a keyspace for this session");
     }
+#endif
 
-    public AuthenticatedUser getUser()
-    {
-        return user;
+    ::shared_ptr<auth::authenticated_user> user() const {
+        return _user;
     }
 
+#if 0
     public static SemanticVersion[] getCQLSupportedVersion()
     {
         return new SemanticVersion[]{ QueryProcessor.CQL_VERSION };
@@ -313,3 +304,4 @@ public:
 };
 
 }
+

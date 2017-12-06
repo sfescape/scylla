@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -22,6 +22,7 @@
 #include "locator/abstract_replication_strategy.hh"
 #include "utils/class_registrator.hh"
 #include "exceptions/exceptions.hh"
+#include "stdx.hh"
 
 namespace locator {
 
@@ -41,14 +42,17 @@ abstract_replication_strategy::abstract_replication_strategy(
 
 std::unique_ptr<abstract_replication_strategy> abstract_replication_strategy::create_replication_strategy(const sstring& ks_name, const sstring& strategy_name, token_metadata& tk_metadata, const std::map<sstring, sstring>& config_options) {
     assert(locator::i_endpoint_snitch::get_local_snitch_ptr());
-
-    return create_object<abstract_replication_strategy,
-                         const sstring&,
-                         token_metadata&,
-                         snitch_ptr&,
-                         const std::map<sstring, sstring>&>
-        (strategy_name, ks_name, tk_metadata,
-         locator::i_endpoint_snitch::get_local_snitch_ptr(), config_options);
+    try {
+        return create_object<abstract_replication_strategy,
+                             const sstring&,
+                             token_metadata&,
+                             snitch_ptr&,
+                             const std::map<sstring, sstring>&>
+            (strategy_name, ks_name, tk_metadata,
+             locator::i_endpoint_snitch::get_local_snitch_ptr(), config_options);
+    } catch (const no_such_class& e) {
+        throw exceptions::configuration_exception(e.what());
+    }
 }
 
 void abstract_replication_strategy::validate_replication_strategy(const sstring& ks_name,
@@ -75,7 +79,7 @@ std::vector<inet_address> abstract_replication_strategy::get_natural_endpoints(c
     auto res = cached_endpoints.find(key_token);
 
     if (res == cached_endpoints.end()) {
-        auto endpoints = calculate_natural_endpoints(search_token);
+        auto endpoints = calculate_natural_endpoints(search_token, _token_metadata);
         cached_endpoints.emplace(key_token, endpoints);
 
         return std::move(endpoints);
@@ -108,16 +112,36 @@ abstract_replication_strategy::get_cached_endpoints() {
     return _cached_endpoints;
 }
 
-std::vector<range<token>>
+static
+void
+insert_token_range_to_sorted_container_while_unwrapping(
+        const dht::token& prev_tok,
+        const dht::token& tok,
+        dht::token_range_vector& ret) {
+    if (prev_tok < tok) {
+        ret.emplace_back(
+                dht::token_range::bound(prev_tok, false),
+                dht::token_range::bound(tok, true));
+    } else {
+        ret.emplace_back(
+                dht::token_range::bound(prev_tok, false),
+                stdx::nullopt);
+        // Insert in front to maintain sorded order
+        ret.emplace(
+                ret.begin(),
+                stdx::nullopt,
+                dht::token_range::bound(tok, true));
+    }
+}
+
+dht::token_range_vector
 abstract_replication_strategy::get_ranges(inet_address ep) const {
-    std::vector<range<token>> ret;
+    dht::token_range_vector ret;
     auto prev_tok = _token_metadata.sorted_tokens().back();
     for (auto tok : _token_metadata.sorted_tokens()) {
-        for (inet_address a : calculate_natural_endpoints(tok)) {
+        for (inet_address a : calculate_natural_endpoints(tok, _token_metadata)) {
             if (a == ep) {
-                ret.emplace_back(
-                        range<token>::bound(prev_tok, false),
-                        range<token>::bound(tok, true));
+                insert_token_range_to_sorted_container_while_unwrapping(prev_tok, tok, ret);
                 break;
             }
         }
@@ -126,18 +150,64 @@ abstract_replication_strategy::get_ranges(inet_address ep) const {
     return ret;
 }
 
-std::vector<range<token>>
+dht::token_range_vector
 abstract_replication_strategy::get_primary_ranges(inet_address ep) {
-    std::vector<range<token>> ret;
+    dht::token_range_vector ret;
     auto prev_tok = _token_metadata.sorted_tokens().back();
     for (auto tok : _token_metadata.sorted_tokens()) {
-        auto&& eps = calculate_natural_endpoints(tok);
+        auto&& eps = calculate_natural_endpoints(tok, _token_metadata);
         if (eps.size() > 0 && eps[0] == ep) {
-            ret.emplace_back(
-                    range<token>::bound(prev_tok, false),
-                    range<token>::bound(tok, true));
+            insert_token_range_to_sorted_container_while_unwrapping(prev_tok, tok, ret);
         }
         prev_tok = tok;
+    }
+    return ret;
+}
+
+std::unordered_multimap<inet_address, dht::token_range>
+abstract_replication_strategy::get_address_ranges(token_metadata& tm) const {
+    std::unordered_multimap<inet_address, dht::token_range> ret;
+    for (auto& t : tm.sorted_tokens()) {
+        dht::token_range_vector r = tm.get_primary_ranges_for(t);
+        auto eps = calculate_natural_endpoints(t, tm);
+        logger.debug("token={}, primary_range={}, address={}", t, r, eps);
+        for (auto ep : eps) {
+            for (auto&& rng : r) {
+                ret.emplace(ep, rng);
+            }
+        }
+    }
+    return ret;
+}
+
+std::unordered_multimap<dht::token_range, inet_address>
+abstract_replication_strategy::get_range_addresses(token_metadata& tm) const {
+    std::unordered_multimap<dht::token_range, inet_address> ret;
+    for (auto& t : tm.sorted_tokens()) {
+        dht::token_range_vector r = tm.get_primary_ranges_for(t);
+        auto eps = calculate_natural_endpoints(t, tm);
+        for (auto ep : eps) {
+            for (auto&& rng : r)
+                ret.emplace(rng, ep);
+        }
+    }
+    return ret;
+}
+
+dht::token_range_vector
+abstract_replication_strategy::get_pending_address_ranges(token_metadata& tm, token pending_token, inet_address pending_address) {
+    return get_pending_address_ranges(tm, std::unordered_set<token>{pending_token}, pending_address);
+}
+
+dht::token_range_vector
+abstract_replication_strategy::get_pending_address_ranges(token_metadata& tm, std::unordered_set<token> pending_tokens, inet_address pending_address) {
+    dht::token_range_vector ret;
+    auto temp = tm.clone_only_token_map();
+    temp.update_normal_tokens(pending_tokens, pending_address);
+    for (auto& x : get_address_ranges(temp)) {
+        if (x.first == pending_address) {
+            ret.push_back(x.second);
+        }
     }
     return ret;
 }

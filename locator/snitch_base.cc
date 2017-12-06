@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -39,8 +39,6 @@
 #include "locator/snitch_base.hh"
 
 namespace locator {
-
-logging::logger i_endpoint_snitch::snitch_logger("snitch_logger");
 
 std::vector<inet_address> snitch_base::get_sorted_list_by_proximity(
     inet_address address,

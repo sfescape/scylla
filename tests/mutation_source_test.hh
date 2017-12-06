@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -27,3 +27,36 @@ using populate_fn = std::function<mutation_source(schema_ptr s, const std::vecto
 
 // Must be run in a seastar thread
 void run_mutation_source_tests(populate_fn populate);
+
+enum are_equal { no, yes };
+
+// Calls the provided function on mutation pairs, equal and not equal. Is supposed
+// to exercise all potential ways two mutations may differ.
+void for_each_mutation_pair(std::function<void(const mutation&, const mutation&, are_equal)>);
+
+// Calls the provided function on mutations. Is supposed to exercise as many differences as possible.
+void for_each_mutation(std::function<void(const mutation&)>);
+
+// Returns true if mutations in schema s1 can be upgraded to s2.
+inline bool can_upgrade_schema(schema_ptr from, schema_ptr to) {
+    return from->is_counter() == to->is_counter();
+}
+
+class random_mutation_generator {
+    class impl;
+    std::unique_ptr<impl> _impl;
+public:
+    struct generate_counters_tag { };
+    using generate_counters = bool_class<generate_counters_tag>;
+
+    explicit random_mutation_generator(generate_counters);
+    ~random_mutation_generator();
+    mutation operator()();
+    // Generates n mutations sharing the same schema nad sorted by their decorated keys.
+    std::vector<mutation> operator()(size_t n);
+    schema_ptr schema() const;
+    clustering_key make_random_key();
+    std::vector<query::clustering_range> make_random_ranges(unsigned n_ranges);
+};
+
+bytes make_blob(size_t blob_size);

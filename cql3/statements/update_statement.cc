@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -40,6 +40,8 @@
  */
 
 #include "update_statement.hh"
+#include "raw/update_statement.hh"
+#include "raw/insert_statement.hh"
 #include "unimplemented.hh"
 
 #include "cql3/operation_impl.hh"
@@ -48,30 +50,44 @@ namespace cql3 {
 
 namespace statements {
 
-void update_statement::add_update_for_key(mutation& m, const exploded_clustering_prefix& prefix, const update_parameters& params) {
-    if (s->is_dense()) {
-        if (!prefix || (prefix.size() == 1 && prefix.components().front().empty())) {
-            throw exceptions::invalid_request_exception(sprint("Missing PRIMARY KEY part %s", *s->clustering_key_columns().begin()));
-        }
+update_statement::update_statement(statement_type type, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, uint64_t* cql_stats_counter_ptr)
+    : modification_statement{type, bound_terms, std::move(s), std::move(attrs), cql_stats_counter_ptr}
+{ }
 
-        // An empty name for the compact value is what we use to recognize the case where there is not column
+bool update_statement::require_full_clustering_key() const {
+    return true;
+}
+
+bool update_statement::allow_clustering_key_slices() const {
+    return false;
+}
+
+void update_statement::add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params) {
+    auto prefix = range.start() ? std::move(range.start()->value()) : clustering_key_prefix::make_empty();
+    if (s->is_dense()) {
+        if (prefix.is_empty(*s) || prefix.components().front().empty()) {
+            throw exceptions::invalid_request_exception(sprint("Missing PRIMARY KEY part %s", s->clustering_key_columns().begin()->name_as_text()));
+        }
+        // An empty name for the value is what we use to recognize the case where there is not column
         // outside the PK, see CreateStatement.
-        if (s->compact_column().name().empty()) {
+        // Since v3 schema we use empty_type instead, see schema.cc.
+        auto rb = s->regular_begin();
+        if (rb->name().empty() || rb->type == empty_type) {
             // There is no column outside the PK. So no operation could have passed through validation
             assert(_column_operations.empty());
-            constants::setter(s->compact_column(), make_shared(constants::value(bytes()))).execute(m, prefix, params);
+            constants::setter(*s->regular_begin(), make_shared(constants::value(cql3::raw_value::make_value(bytes())))).execute(m, prefix, params);
         } else {
             // dense means we don't have a row marker, so don't accept to set only the PK. See CASSANDRA-5648.
             if (_column_operations.empty()) {
-                throw exceptions::invalid_request_exception(sprint("Column %s is mandatory for this COMPACT STORAGE table", s->compact_column().name_as_text()));
+                throw exceptions::invalid_request_exception(sprint("Column %s is mandatory for this COMPACT STORAGE table", s->regular_begin()->name_as_text()));
             }
         }
     } else {
         // If there are static columns, there also must be clustering columns, in which
         // case empty prefix can only refer to the static row.
-        bool is_static_prefix = s->has_static_columns() && !prefix;
-        if (type == statement_type::INSERT && !is_static_prefix) {
-            auto& row = m.partition().clustered_row(clustering_key::from_clustering_prefix(*s, prefix));
+        bool is_static_prefix = s->has_static_columns() && prefix.is_empty(*s);
+        if (type.is_insert() && !is_static_prefix && s->is_cql3_table()) {
+            auto& row = m.partition().clustered_row(*s, prefix);
             row.apply(row_marker(params.timestamp(), params.ttl(), params.expiry()));
         }
     }
@@ -100,11 +116,23 @@ void update_statement::add_update_for_key(mutation& m, const exploded_clustering
 #endif
 }
 
-::shared_ptr<modification_statement>
-update_statement::parsed_insert::prepare_internal(database& db, schema_ptr schema,
-    ::shared_ptr<variable_specifications> bound_names, std::unique_ptr<attributes> attrs)
+namespace raw {
+
+insert_statement::insert_statement(            ::shared_ptr<cf_name> name,
+                                               ::shared_ptr<attributes::raw> attrs,
+                                               std::vector<::shared_ptr<column_identifier::raw>> column_names,
+                                               std::vector<::shared_ptr<term::raw>> column_values,
+                                               bool if_not_exists)
+    : raw::modification_statement{std::move(name), std::move(attrs), conditions_vector{}, if_not_exists, false}
+    , _column_names{std::move(column_names)}
+    , _column_values{std::move(column_values)}
+{ }
+
+::shared_ptr<cql3::statements::modification_statement>
+insert_statement::prepare_internal(database& db, schema_ptr schema,
+    ::shared_ptr<variable_specifications> bound_names, std::unique_ptr<attributes> attrs, cql_stats& stats)
 {
-    auto stmt = ::make_shared<update_statement>(statement_type::INSERT, bound_names->size(), schema, std::move(attrs));
+    auto stmt = ::make_shared<cql3::statements::update_statement>(statement_type::INSERT, bound_names->size(), schema, std::move(attrs), &stats.inserts);
 
     // Created from an INSERT
     if (stmt->is_counter()) {
@@ -119,40 +147,49 @@ update_statement::parsed_insert::prepare_internal(database& db, schema_ptr schem
         throw exceptions::invalid_request_exception("No columns provided to INSERT");
     }
 
+    std::vector<::shared_ptr<relation>> relations;
+    std::unordered_set<bytes> column_ids;
     for (size_t i = 0; i < _column_names.size(); i++) {
-        auto id = _column_names[i]->prepare_column_identifier(schema);
+        auto&& col = _column_names[i];
+        auto id = col->prepare_column_identifier(schema);
         auto def = get_column_definition(schema, *id);
         if (!def) {
             throw exceptions::invalid_request_exception(sprint("Unknown identifier %s", *id));
         }
-
-        for (size_t j = 0; j < i; j++) {
-            auto other_id = _column_names[j]->prepare_column_identifier(schema);
-            if (*id == *other_id) {
-                throw exceptions::invalid_request_exception(sprint("Multiple definitions found for column %s", *id));
-            }
+        if (column_ids.count(id->name())) {
+            throw exceptions::invalid_request_exception(sprint("Multiple definitions found for column %s", *id));
         }
+        column_ids.emplace(id->name());
 
         auto&& value = _column_values[i];
 
         if (def->is_primary_key()) {
-            auto t = value->prepare(db, keyspace(), def->column_specification);
-            t->collect_marker_specification(bound_names);
-            stmt->add_key_value(*def, std::move(t));
+            relations.push_back(::make_shared<single_column_relation>(col, operator_type::EQ, value));
         } else {
             auto operation = operation::set_value(value).prepare(db, keyspace(), *def);
             operation->collect_marker_specification(bound_names);
             stmt->add_operation(std::move(operation));
         };
     }
+    stmt->process_where_clause(db, relations, std::move(bound_names));
     return stmt;
 }
 
-::shared_ptr<modification_statement>
-update_statement::parsed_update::prepare_internal(database& db, schema_ptr schema,
-    ::shared_ptr<variable_specifications> bound_names, std::unique_ptr<attributes> attrs)
+update_statement::update_statement(            ::shared_ptr<cf_name> name,
+                                               ::shared_ptr<attributes::raw> attrs,
+                                               std::vector<std::pair<::shared_ptr<column_identifier::raw>, ::shared_ptr<operation::raw_update>>> updates,
+                                               std::vector<relation_ptr> where_clause,
+                                               conditions_vector conditions)
+    : raw::modification_statement(std::move(name), std::move(attrs), std::move(conditions), false, false)
+    , _updates(std::move(updates))
+    , _where_clause(std::move(where_clause))
+{ }
+
+::shared_ptr<cql3::statements::modification_statement>
+update_statement::prepare_internal(database& db, schema_ptr schema,
+    ::shared_ptr<variable_specifications> bound_names, std::unique_ptr<attributes> attrs, cql_stats& stats)
 {
-    auto stmt = ::make_shared<update_statement>(statement_type::UPDATE, bound_names->size(), schema, std::move(attrs));
+    auto stmt = ::make_shared<cql3::statements::update_statement>(statement_type::UPDATE, bound_names->size(), schema, std::move(attrs), &stats.updates);
 
     for (auto&& entry : _updates) {
         auto id = entry.first->prepare_column_identifier(schema);
@@ -170,8 +207,10 @@ update_statement::parsed_update::prepare_internal(database& db, schema_ptr schem
         stmt->add_operation(std::move(operation));
     }
 
-    stmt->process_where_clause(db, _where_clause, bound_names);
+    stmt->process_where_clause(db, _where_clause, std::move(bound_names));
     return stmt;
+}
+
 }
 
 }

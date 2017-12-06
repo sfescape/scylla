@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -23,17 +23,58 @@
 
 #include <cstdlib>
 #include <seastar/core/memory.hh>
+#include <seastar/util/alloc_failure_injector.hh>
+#include <malloc.h>
 
+// A function used by compacting collectors to migrate objects during
+// compaction. The function should reconstruct the object located at src
+// in the location pointed by dst. The object at old location should be
+// destroyed. See standard_migrator() above for example. Both src and dst
+// are aligned as requested during alloc()/construct().
+class migrate_fn_type {
+    uint32_t _align = 0;
+    uint32_t _index;
+private:
+    static uint32_t register_migrator(const migrate_fn_type* m);
+    static void unregister_migrator(uint32_t index);
+public:
+    explicit migrate_fn_type(size_t align) : _align(align), _index(register_migrator(this)) {}
+    virtual ~migrate_fn_type() { unregister_migrator(_index); }
+    virtual void migrate(void* src, void* dsts) const noexcept = 0;
+    virtual size_t size(const void* obj) const = 0;
+    size_t align() const { return _align; }
+    uint32_t index() const { return _index; }
+};
+
+// Non-constant-size classes (ending with `char data[0]`) must override this
+// to tell the allocator about the real size of the object
 template <typename T>
 inline
-void standard_migrator(void* src, void* dst, size_t) noexcept {
-    static_assert(std::is_nothrow_move_constructible<T>::value, "T must be nothrow move-constructible.");
-    static_assert(std::is_nothrow_destructible<T>::value, "T must be nothrow destructible.");
-
-    T* src_t = static_cast<T*>(src);
-    new (static_cast<T*>(dst)) T(std::move(*src_t));
-    src_t->~T();
+size_t
+size_for_allocation_strategy(const T& obj) {
+    return sizeof(T);
 }
+
+template <typename T>
+class standard_migrator final : public migrate_fn_type {
+public:
+    standard_migrator() : migrate_fn_type(alignof(T)) {}
+    virtual void migrate(void* src, void* dst) const noexcept override {
+        static_assert(std::is_nothrow_move_constructible<T>::value, "T must be nothrow move-constructible.");
+        static_assert(std::is_nothrow_destructible<T>::value, "T must be nothrow destructible.");
+
+        T* src_t = static_cast<T*>(src);
+        new (static_cast<T*>(dst)) T(std::move(*src_t));
+        src_t->~T();
+    }
+    virtual size_t size(const void* obj) const override {
+        return size_for_allocation_strategy(*static_cast<const T*>(obj));
+    }
+    static standard_migrator object;  // would like to use variable templates, but only available in gcc 5
+};
+
+template <typename T>
+standard_migrator<T> standard_migrator<T>::object;
 
 //
 // Abstracts allocation strategy for managed objects.
@@ -58,13 +99,11 @@ void standard_migrator(void* src, void* dst, size_t) noexcept {
 // across deferring points.
 //
 class allocation_strategy {
+protected:
+    size_t _preferred_max_contiguous_allocation = std::numeric_limits<size_t>::max();
+    uint64_t _invalidate_counter = 1;
 public:
-    // A function used by compacting collectors to migrate objects during
-    // compaction. The function should reconstruct the object located at src
-    // in the location pointed by dst. The object at old location should be
-    // destroyed. See standard_migrator() above for example. Both src and dst
-    // are aligned as requested during alloc()/construct().
-    using migrate_fn = void (*)(void* src, void* dst, size_t size) noexcept;
+    using migrate_fn = const migrate_fn_type*;
 
     virtual ~allocation_strategy() {}
 
@@ -81,18 +120,26 @@ public:
 
     // Releases storage for the object. Doesn't invoke object's destructor.
     // Doesn't invalidate references to objects allocated with this strategy.
-    virtual void free(void*) = 0;
+    virtual void free(void* object, size_t size) = 0;
+
+    // Returns the total immutable memory size used by the allocator to host
+    // this object.  This will be at least the size of the object itself, plus
+    // any immutable overhead needed to represent the object (if any).
+    //
+    // The immutable overhead is the overhead that cannot change over the
+    // lifetime of the object (such as padding, etc).
+    virtual size_t object_memory_size_in_allocator(const void* obj) const noexcept = 0;
 
     // Like alloc() but also constructs the object with a migrator using
     // standard move semantics. Allocates respecting object's alignment
     // requirement.
     template<typename T, typename... Args>
     T* construct(Args&&... args) {
-        void* storage = alloc(standard_migrator<T>, sizeof(T), alignof(T));
+        void* storage = alloc(&standard_migrator<T>::object, sizeof(T), alignof(T));
         try {
             return new (storage) T(std::forward<Args>(args)...);
         } catch (...) {
-            free(storage);
+            free(storage, sizeof(T));
             throw;
         }
     }
@@ -101,14 +148,32 @@ public:
     // Doesn't invalidate references to allocated objects.
     template<typename T>
     void destroy(T* obj) {
+        size_t size = size_for_allocation_strategy(*obj);
         obj->~T();
-        free(obj);
+        free(obj, size);
+    }
+
+    size_t preferred_max_contiguous_allocation() const {
+        return _preferred_max_contiguous_allocation;
+    }
+
+    // Returns a number which is increased when references to objects managed by this allocator
+    // are invalidated, e.g. due to internal events like compaction or eviction.
+    // When the value returned by this method doesn't change, references obtained
+    // between invocations remain valid.
+    uint64_t invalidate_counter() const {
+        return _invalidate_counter;
+    }
+
+    void invalidate_references() {
+        ++_invalidate_counter;
     }
 };
 
 class standard_allocation_strategy : public allocation_strategy {
 public:
     virtual void* alloc(migrate_fn, size_t size, size_t alignment) override {
+        seastar::memory::on_alloc_point();
         // ASAN doesn't intercept aligned_alloc() and complains on free().
         void* ret;
         if (posix_memalign(&ret, alignment, size) != 0) {
@@ -117,8 +182,12 @@ public:
         return ret;
     }
 
-    virtual void free(void* obj) override {
+    virtual void free(void* obj, size_t size) override {
         ::free(obj);
+    }
+
+    virtual size_t object_memory_size_in_allocator(const void* obj) const noexcept {
+        return ::malloc_usable_size(const_cast<void *>(obj));
     }
 };
 
@@ -149,6 +218,19 @@ auto current_deleter() {
     };
 }
 
+template<typename T>
+struct alloc_strategy_deleter {
+    void operator()(T* ptr) const noexcept {
+        current_allocator().destroy(ptr);
+    }
+};
+
+// std::unique_ptr which can be used for owning an object allocated using allocation_strategy.
+// Must be destroyed before the pointer is invalidated. For compacting allocators, that
+// means it must not escape outside allocating_section or reclaim lock.
+// Must be destroyed in the same allocating context in which T was allocated.
+template<typename T>
+using alloc_strategy_unique_ptr = std::unique_ptr<T, alloc_strategy_deleter<T>>;
 
 //
 // Passing allocators to objects.

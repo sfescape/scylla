@@ -43,12 +43,34 @@
          ]
       },
       {
+         "path":"/failure_detector/endpoint_phi_values",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get end point phi values",
+               "type":"array",
+               "items":{
+                  "type":"endpoint_phi_values"
+               },
+               "nickname":"get_endpoint_phi_values",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
          "path":"/failure_detector/endpoints/",
          "operations":[
             {
                "method":"GET",
                "summary":"Get all endpoint states",
-               "type":"string",
+               "type":"array",
+               "items":{
+                  "type":"endpoint_state"
+               },
                "nickname":"get_all_endpoint_states",
                "produces":[
                   "application/json"
@@ -146,6 +168,71 @@
                 "value": {
                     "type": "string",
                     "description": "The value"
+                }
+            }
+        },
+        "endpoint_state": {
+           "id": "states",
+           "description": "Holds an endpoint state",
+               "properties": {
+                "addrs": {
+                    "type": "string",
+                    "description": "The endpoint address"
+                },
+                "generation": {
+                    "type": "int",
+                    "description": "The heart beat generation"
+                },
+                "version": {
+                    "type": "int",
+                    "description": "The heart beat version"
+                },
+                "update_time": {
+                    "type": "long",
+                    "description": "The update timestamp"
+                },
+                "is_alive": {
+                    "type": "boolean",
+                    "description": "Is the endpoint alive"
+                },
+                "application_state" : {
+                    "type":"array",
+                    "items":{
+                        "type":"version_value"
+                    },
+                    "description": "Is the endpoint alive"
+                }
+            }
+        },
+        "version_value": {
+           "id": "version_value",
+           "description": "Holds a version value for an application state",
+               "properties": {
+                "application_state": {
+                    "type": "int",
+                    "description": "The application state enum index"
+                },
+                "value": {
+                    "type": "string",
+                    "description": "The version value"
+                },
+                "version": {
+                    "type": "int",
+                    "description": "The application state version"
+                }
+            }
+        },
+        "endpoint_phi_value": {
+            "id" : "endpoint_phi_value",
+            "description": "Holds phi value for a single end point",
+            "properties": {
+                "phi": {
+                    "type": "double",
+                    "description": "Phi value"
+                },
+                "endpoint": {
+                    "type": "string",
+                    "description": "end point address"
                 }
             }
         }

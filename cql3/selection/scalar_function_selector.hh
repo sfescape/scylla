@@ -16,8 +16,8 @@
  * limitations under the License.
  */
 /*
- * Modified by Cloudius Systems
- * Copyright 2015 Cloudius Systems
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -57,7 +57,7 @@ public:
         return _arg_selectors[0]->is_aggregate();
     }
 
-    virtual void add_input(serialization_format sf, result_set_builder& rs) override {
+    virtual void add_input(cql_serialization_format sf, result_set_builder& rs) override {
         size_t m = _arg_selectors.size();
         for (size_t i = 0; i < m; ++i) {
             auto&& s = _arg_selectors[i];
@@ -68,7 +68,7 @@ public:
     virtual void reset() override {
     }
 
-    virtual bytes_opt get_output(serialization_format sf) override {
+    virtual bytes_opt get_output(cql_serialization_format sf) override {
         size_t m = _arg_selectors.size();
         for (size_t i = 0; i < m; ++i) {
             auto&& s = _arg_selectors[i];

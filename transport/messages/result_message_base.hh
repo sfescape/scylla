@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -22,7 +22,7 @@
 
 #pragma once
 
-namespace transport {
+namespace cql_transport {
 namespace messages {
 
 class result_message {

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -40,39 +40,48 @@
  */
 
 #include "delete_statement.hh"
+#include "raw/delete_statement.hh"
 
 namespace cql3 {
 
 namespace statements {
 
-void delete_statement::add_update_for_key(mutation& m, const exploded_clustering_prefix& prefix, const update_parameters& params) {
+delete_statement::delete_statement(statement_type type, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, cql_stats& stats)
+        : modification_statement{type, bound_terms, std::move(s), std::move(attrs), &stats.deletes}
+{ }
+
+bool delete_statement::require_full_clustering_key() const {
+    return false;
+}
+
+bool delete_statement::allow_clustering_key_slices() const {
+    return true;
+}
+
+void delete_statement::add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params) {
     if (_column_operations.empty()) {
-        m.partition().apply_delete(*s, prefix, params.make_tombstone());
+        if (s->clustering_key_size() == 0 || range.is_full()) {
+            m.partition().apply(params.make_tombstone());
+        } else if (range.is_singular()) {
+            m.partition().apply_delete(*s, range.start()->value(), params.make_tombstone());
+        } else {
+            auto bvs = bound_view::from_range(range);
+            m.partition().apply_delete(*s, range_tombstone(bvs.first, bvs.second, params.make_tombstone()));
+        }
         return;
     }
 
-    if (prefix.size() < s->clustering_key_size()) {
-        // In general, we can't delete specific columns if not all clustering columns have been specified.
-        // However, if we delete only static columns, it's fine since we won't really use the prefix anyway.
-        for (auto&& deletion : _column_operations) {
-            if (!deletion->column.is_static()) {
-                throw exceptions::invalid_request_exception(sprint(
-                    "Primary key column '%s' must be specified in order to delete column '%s'",
-                    get_first_empty_key()->name_as_text(), deletion->column.name_as_text()));
-            }
-        }
-    }
-
     for (auto&& op : _column_operations) {
-        op->execute(m, prefix, params);
+        op->execute(m, range.start() ? std::move(range.start()->value()) : clustering_key_prefix::make_empty(), params);
     }
 }
 
-::shared_ptr<modification_statement>
-delete_statement::parsed::prepare_internal(database& db, schema_ptr schema, ::shared_ptr<variable_specifications> bound_names,
-        std::unique_ptr<attributes> attrs) {
+namespace raw {
 
-    auto stmt = ::make_shared<delete_statement>(statement_type::DELETE, bound_names->size(), schema, std::move(attrs));
+::shared_ptr<cql3::statements::modification_statement>
+delete_statement::prepare_internal(database& db, schema_ptr schema, shared_ptr<variable_specifications> bound_names,
+        std::unique_ptr<attributes> attrs, cql_stats& stats) {
+    auto stmt = ::make_shared<cql3::statements::delete_statement>(statement_type::DELETE, bound_names->size(), schema, std::move(attrs), stats);
 
     for (auto&& deletion : _deletions) {
         auto&& id = deletion->affected_column()->prepare_column_identifier(schema);
@@ -93,8 +102,29 @@ delete_statement::parsed::prepare_internal(database& db, schema_ptr schema, ::sh
     }
 
     stmt->process_where_clause(db, _where_clause, std::move(bound_names));
+    if (!stmt->restrictions()->get_clustering_columns_restrictions()->has_bound(bound::START)
+            || !stmt->restrictions()->get_clustering_columns_restrictions()->has_bound(bound::END)) {
+        throw exceptions::invalid_request_exception("A range deletion operation needs to specify both bounds");
+    }
+    if (!schema->is_compound() && stmt->restrictions()->get_clustering_columns_restrictions()->is_slice()) {
+        throw exceptions::invalid_request_exception("Range deletions on \"compact storage\" schemas are not supported");
+    }
     return stmt;
 }
 
+delete_statement::delete_statement(::shared_ptr<cf_name> name,
+                                 ::shared_ptr<attributes::raw> attrs,
+                                 std::vector<::shared_ptr<operation::raw_deletion>> deletions,
+                                 std::vector<::shared_ptr<relation>> where_clause,
+                                 conditions_vector conditions,
+                                 bool if_exists)
+    : raw::modification_statement(std::move(name), std::move(attrs), std::move(conditions), false, if_exists)
+    , _deletions(std::move(deletions))
+    , _where_clause(std::move(where_clause))
+{ }
+
 }
+
+}
+
 }

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -47,6 +47,7 @@
 #include "database.hh"
 #include "schema_builder.hh"
 #include "compaction_strategy.hh"
+#include "utils/UUID.hh"
 
 namespace cql3 {
 
@@ -70,8 +71,12 @@ public:
 
     static const sstring KW_COMPACTION;
     static const sstring KW_COMPRESSION;
+    static const sstring KW_CRC_CHECK_CHANCE;
+
+    static const sstring KW_ID;
 
     static const sstring COMPACTION_STRATEGY_CLASS_KEY;
+    static const sstring COMPACTION_ENABLED_KEY;
 
     // FIXME: In origin the following consts are in CFMetaData.
     static constexpr int32_t DEFAULT_DEFAULT_TIME_TO_LIVE = 0;
@@ -82,7 +87,7 @@ private:
 public:
     void validate();
     std::map<sstring, sstring> get_compaction_options() const;
-    std::map<sstring, sstring> get_compression_options() const;
+    stdx::optional<std::map<sstring, sstring>> get_compression_options() const;
 #if 0
     public CachingOptions getCachingOptions() throws SyntaxException, ConfigurationException
     {
@@ -100,6 +105,10 @@ public:
         return options;
     }
 #endif
+    int32_t get_default_time_to_live() const;
+    int32_t get_gc_grace_seconds() const;
+    stdx::optional<utils::UUID> get_id() const;
+
     void apply_to_builder(schema_builder& builder);
     void validate_minimum_int(const sstring& field, int32_t minimum_value, int32_t default_value) const;
 };

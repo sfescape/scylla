@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -43,6 +43,7 @@
 
 #include <vector>
 #include "cql3/restrictions/single_column_restriction.hh"
+#include "statements/request_validations.hh"
 
 #include "core/shared_ptr.hh"
 #include "to_string.hh"
@@ -110,6 +111,11 @@ public:
     ::shared_ptr<term::raw> get_map_key() {
         return _map_key;
     }
+
+    ::shared_ptr<term::raw> get_value() {
+        return _value;
+    }
+
 protected:
     virtual ::shared_ptr<term> to_term(const std::vector<::shared_ptr<column_specification>>& receivers,
                           ::shared_ptr<term::raw> raw, database& db, const sstring& keyspace,
@@ -134,7 +140,7 @@ protected:
         }
 
         if (is_IN()) {
-            return sprint("%s IN %s", entity_as_string, ::to_string(_in_values));
+            return sprint("%s IN (%s)", entity_as_string, join(", ", _in_values));
         }
 
         return sprint("%s %s %s", entity_as_string, _relation_type, _value->to_string());
@@ -152,6 +158,19 @@ protected:
             statements::bound bound,
             bool inclusive) override {
         auto&& column_def = to_column_definition(schema, _entity);
+
+        if (column_def.type->references_duration()) {
+            using statements::request_validations::check_false;
+            const auto& ty = *column_def.type;
+
+            check_false(ty.is_collection(), "Slice restrictions are not supported on collections containing durations");
+            check_false(ty.is_tuple(), "Slice restrictions are not supported on tuples containing durations");
+            check_false(ty.is_user_type(), "Slice restrictions are not supported on UDTs containing durations");
+
+            // We're a duration.
+            throw exceptions::invalid_request_exception("Slice restrictions are not supported on duration columns");
+        }
+
         auto term = to_term(to_receivers(schema, column_def), _value, db, schema->ks_name(), std::move(bound_names));
         return ::make_shared<restrictions::single_column_restriction::slice>(column_def, bound, inclusive, std::move(term));
     }
@@ -159,12 +178,16 @@ protected:
     virtual shared_ptr<restrictions::restriction> new_contains_restriction(database& db, schema_ptr schema,
                                                  ::shared_ptr<variable_specifications> bound_names,
                                                  bool is_key) override {
-        throw std::runtime_error("not implemented");
-#if 0
-        ColumnDefinition columnDef = toColumnDefinition(schema, entity);
-        Term term = toTerm(toReceivers(schema, columnDef), value, schema.ksName, bound_names);
-        return new SingleColumnRestriction.Contains(columnDef, term, is_key);
-#endif
+        auto&& column_def = to_column_definition(schema, _entity);
+        auto term = to_term(to_receivers(schema, column_def), _value, db, schema->ks_name(), std::move(bound_names));
+        return ::make_shared<restrictions::single_column_restriction::contains>(column_def, std::move(term), is_key);
+    }
+
+    virtual ::shared_ptr<relation> maybe_rename_identifier(const column_identifier::raw& from, column_identifier::raw to) override {
+        return *_entity == from
+            ? ::make_shared(single_column_relation(
+                  ::make_shared<column_identifier::raw>(std::move(to)), _map_key, _relation_type, _value, _in_values))
+            : static_pointer_cast<single_column_relation>(shared_from_this());
     }
 
 private:

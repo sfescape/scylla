@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -27,22 +27,22 @@
 #include <sstream>
 
 using namespace httpd::messaging_service_json;
-using namespace net;
+using namespace netw;
 
 namespace api {
 
 using shard_info = messaging_service::shard_info;
-using shard_id = messaging_service::shard_id;
+using msg_addr = messaging_service::msg_addr;
 
-static const int32_t num_verb = static_cast<int32_t>(messaging_verb::UNUSED_3) + 1;
+static const int32_t num_verb = static_cast<int32_t>(messaging_verb::LAST);
 
 std::vector<message_counter> map_to_message_counters(
         const std::unordered_map<gms::inet_address, unsigned long>& map) {
     std::vector<message_counter> res;
     for (auto i : map) {
         res.push_back(message_counter());
-        res.back().ip = boost::lexical_cast<sstring>(i.first);
-        res.back().count = i.second;
+        res.back().key = boost::lexical_cast<sstring>(i.first);
+        res.back().value = i.second;
     }
     return res;
 }
@@ -58,7 +58,7 @@ future_json_function get_client_getter(std::function<uint64_t(const shard_info&)
         using map_type = std::unordered_map<gms::inet_address, uint64_t>;
         auto get_shard_map = [f](messaging_service& ms) {
             std::unordered_map<gms::inet_address, unsigned long> map;
-            ms.foreach_client([&map, f] (const shard_id& id, const shard_info& info) {
+            ms.foreach_client([&map, f] (const msg_addr& id, const shard_info& info) {
                 map[id.addr] = f(info);
             });
             return map;
@@ -70,10 +70,37 @@ future_json_function get_client_getter(std::function<uint64_t(const shard_info&)
     };
 }
 
+future_json_function get_server_getter(std::function<uint64_t(const rpc::stats&)> f) {
+    return [f](std::unique_ptr<request> req) {
+        using map_type = std::unordered_map<gms::inet_address, uint64_t>;
+        auto get_shard_map = [f](messaging_service& ms) {
+            std::unordered_map<gms::inet_address, unsigned long> map;
+            ms.foreach_server_connection_stats([&map, f] (const rpc::client_info& info, const rpc::stats& stats) mutable {
+                map[gms::inet_address(net::ipv4_address(info.addr))] = f(stats);
+            });
+            return map;
+        };
+        return  get_messaging_service().map_reduce0(get_shard_map, map_type(), map_sum<map_type>).
+                then([](map_type&& map) {
+            return make_ready_future<json::json_return_type>(map_to_message_counters(map));
+        });
+    };
+}
+
 void set_messaging_service(http_context& ctx, routes& r) {
+    get_timeout_messages.set(r, get_client_getter([](const shard_info& c) {
+        return c.get_stats().timeout;
+    }));
 
     get_sent_messages.set(r, get_client_getter([](const shard_info& c) {
         return c.get_stats().sent_messages;
+    }));
+
+    get_dropped_messages.set(r, get_client_getter([](const shard_info& c) {
+        // We don't have the same drop message mechanism
+        // as origin has.
+        // hence we can always return 0
+        return 0;
     }));
 
     get_exception_messages.set(r, get_client_getter([](const shard_info& c) {
@@ -84,14 +111,22 @@ void set_messaging_service(http_context& ctx, routes& r) {
         return c.get_stats().pending;
     }));
 
-    get_respond_pending_messages.set(r, get_client_getter([](const shard_info& c) {
-        return c.get_stats().wait_reply;
+    get_respond_pending_messages.set(r, get_server_getter([](const rpc::stats& c) {
+        return c.pending;
     }));
 
-    get_dropped_messages.set(r, [](std::unique_ptr<request> req) {
-        shared_ptr<std::vector<uint64_t>> map = make_shared<std::vector<uint64_t>>(num_verb, 0);
+    get_respond_completed_messages.set(r, get_server_getter([](const rpc::stats& c) {
+        return c.sent_messages;
+    }));
 
-        return net::get_messaging_service().map_reduce([map](const uint64_t* local_map) mutable {
+    get_version.set(r, [](const_req req) {
+        return netw::get_local_messaging_service().get_raw_version(req.get_query_param("addr"));
+    });
+
+    get_dropped_messages_by_ver.set(r, [](std::unique_ptr<request> req) {
+        shared_ptr<std::vector<uint64_t>> map = make_shared<std::vector<uint64_t>>(num_verb);
+
+        return netw::get_messaging_service().map_reduce([map](const uint64_t* local_map) mutable {
             for (auto i = 0; i < num_verb; i++) {
                 (*map)[i]+= local_map[i];
             }
@@ -102,8 +137,12 @@ void set_messaging_service(http_context& ctx, routes& r) {
             for (auto i : verb_counter::verb_wrapper::all_items()) {
                 verb_counter c;
                 messaging_verb v = i; // for type safety we use messaging_verb values
-                if ((*map)[static_cast<int32_t>(v)] > 0) {
-                    c.count = (*map)[static_cast<int32_t>(v)];
+                auto idx = static_cast<uint32_t>(v);
+                if (idx >= map->size()) {
+                    throw std::runtime_error(sprint("verb index out of bounds: %lu, map size: %lu", idx, map->size()));
+                }
+                if ((*map)[idx] > 0) {
+                    c.count = (*map)[idx];
                     c.verb = i;
                     res.push_back(c);
                 }

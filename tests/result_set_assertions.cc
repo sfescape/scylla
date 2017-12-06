@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -39,12 +39,20 @@ row_assertion::matches(const query::result_set_row& row) const {
         auto ss_name = to_sstring(name);
 
         if (!row.has(ss_name)) {
-            if (!value.empty()) {
+            if (!value.is_null()) {
                 return false;
             }
         } else {
             const data_value& val = row.get_data_value(ss_name);
-            if (val != data_value(boost::any(value), val.type())) {
+            if (val != value) {
+                return false;
+            }
+        }
+    }
+    if (_only_that) {
+        for (auto&& e : row.cells()) {
+            auto name = to_bytes(e.first);
+            if (!_expected_values.count(name)) {
                 return false;
             }
         }
@@ -61,7 +69,7 @@ row_assertion::describe(schema_ptr schema) const {
         if (!def) {
             BOOST_FAIL(sprint("Schema is missing column definition for '%s'", name));
         }
-        if (value.empty()) {
+        if (value.is_null()) {
             return sprint("%s=null", to_sstring(name));
         } else {
             return sprint("%s=\"%s\"", to_sstring(name), def->type->to_string(def->type->decompose(value)));

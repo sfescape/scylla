@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -19,7 +19,6 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#define BOOST_TEST_DYN_LINK
 
 #include <boost/test/unit_test.hpp>
 #include "locator/gossiping_property_file_snitch.hh"
@@ -36,6 +35,9 @@ future<> one_test(const std::string& property_fname1,
                   bool exp_result) {
     using namespace locator;
     using namespace boost::filesystem;
+
+    utils::fb_utilities::set_broadcast_address(gms::inet_address("localhost"));
+    utils::fb_utilities::set_broadcast_rpc_address(gms::inet_address("localhost"));
 
     printf("Testing %s and %s property files. Expected result is %s\n",
            property_fname1.c_str(), property_fname2.c_str(),

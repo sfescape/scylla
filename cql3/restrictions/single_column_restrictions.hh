@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -75,7 +75,7 @@ private:
      * The _restrictions per column.
      */
 public:
-    using restrictions_map = std::map<const column_definition*, ::shared_ptr<restriction>, column_definition_comparator>;
+    using restrictions_map = std::map<const column_definition*, ::shared_ptr<single_column_restriction>, column_definition_comparator>;
 private:
     restrictions_map _restrictions;
     bool _is_all_eq = true;
@@ -150,8 +150,7 @@ public:
         }
     }
 
-#if 0
-    virtual bool has_supporting_index(::shared_ptr<secondary_index_manager> index_manager) const override {
+    virtual bool has_supporting_index(const secondary_index::secondary_index_manager& index_manager) const override {
         for (auto&& e : _restrictions) {
             if (e.second->has_supporting_index(index_manager)) {
                 return true;
@@ -159,7 +158,6 @@ public:
         }
         return false;
     }
-#endif
 
     /**
      * Returns the column after the specified one.

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -177,6 +177,20 @@ void set_cache_service(http_context& ctx, routes& r) {
         return make_ready_future<json::json_return_type>(0);
     });
 
+    cs::get_key_hits_moving_avrage.set(r, [&ctx] (std::unique_ptr<request> req) {
+        // TBD
+        // FIXME
+        // See above
+        return make_ready_future<json::json_return_type>(meter_to_json(utils::rate_moving_average()));
+    });
+
+    cs::get_key_requests_moving_avrage.set(r, [&ctx] (std::unique_ptr<request> req) {
+        // TBD
+        // FIXME
+        // See above
+        return make_ready_future<json::json_return_type>(meter_to_json(utils::rate_moving_average()));
+    });
+
     cs::get_key_size.set(r, [] (std::unique_ptr<request> req) {
         // TBD
         // FIXME
@@ -194,41 +208,57 @@ void set_cache_service(http_context& ctx, routes& r) {
     });
 
     cs::get_row_capacity.set(r, [&ctx] (std::unique_ptr<request> req) {
-        return map_reduce_cf(ctx, 0, [](const column_family& cf) {
+        return map_reduce_cf(ctx, uint64_t(0), [](const column_family& cf) {
             return cf.get_row_cache().get_cache_tracker().region().occupancy().used_space();
         }, std::plus<uint64_t>());
     });
 
     cs::get_row_hits.set(r, [&ctx] (std::unique_ptr<request> req) {
-        return map_reduce_cf(ctx, 0, [](const column_family& cf) {
-            return cf.get_row_cache().stats().hits;
-        }, std::plus<int64_t>());
+        return map_reduce_cf(ctx, uint64_t(0), [](const column_family& cf) {
+            return cf.get_row_cache().stats().hits.count();
+        }, std::plus<uint64_t>());
     });
 
     cs::get_row_requests.set(r, [&ctx] (std::unique_ptr<request> req) {
-        return map_reduce_cf(ctx, 0, [](const column_family& cf) {
-            return cf.get_row_cache().stats().hits + cf.get_row_cache().stats().misses;
-        }, std::plus<int64_t>());
+        return map_reduce_cf(ctx, uint64_t(0), [](const column_family& cf) {
+            return cf.get_row_cache().stats().hits.count() + cf.get_row_cache().stats().misses.count();
+        }, std::plus<uint64_t>());
     });
 
     cs::get_row_hit_rate.set(r, [&ctx] (std::unique_ptr<request> req) {
         return map_reduce_cf(ctx, ratio_holder(), [](const column_family& cf) {
-            return ratio_holder(cf.get_row_cache().stats().hits + cf.get_row_cache().stats().misses,
-                    cf.get_row_cache().stats().hits);
+            return ratio_holder(cf.get_row_cache().stats().hits.count() + cf.get_row_cache().stats().misses.count(),
+                    cf.get_row_cache().stats().hits.count());
         }, std::plus<ratio_holder>());
+    });
+
+    cs::get_row_hits_moving_avrage.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return map_reduce_cf_raw(ctx, utils::rate_moving_average(), [](const column_family& cf) {
+            return cf.get_row_cache().stats().hits.rate();
+        }, std::plus<utils::rate_moving_average>()).then([](const utils::rate_moving_average& m) {
+            return make_ready_future<json::json_return_type>(meter_to_json(m));
+        });
+    });
+
+    cs::get_row_requests_moving_avrage.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return map_reduce_cf_raw(ctx, utils::rate_moving_average(), [](const column_family& cf) {
+            return cf.get_row_cache().stats().hits.rate() + cf.get_row_cache().stats().misses.rate();
+        }, std::plus<utils::rate_moving_average>()).then([](const utils::rate_moving_average& m) {
+            return make_ready_future<json::json_return_type>(meter_to_json(m));
+        });
     });
 
     cs::get_row_size.set(r, [&ctx] (std::unique_ptr<request> req) {
         // In origin row size is the weighted size.
         // We currently do not support weights, so we use num entries instead
         return map_reduce_cf(ctx, 0, [](const column_family& cf) {
-            return cf.get_row_cache().num_entries();
+            return cf.get_row_cache().partitions();
         }, std::plus<uint64_t>());
     });
 
     cs::get_row_entries.set(r, [&ctx] (std::unique_ptr<request> req) {
         return map_reduce_cf(ctx, 0, [](const column_family& cf) {
-            return cf.get_row_cache().num_entries();
+            return cf.get_row_cache().partitions();
         }, std::plus<uint64_t>());
     });
 
@@ -262,6 +292,20 @@ void set_cache_service(http_context& ctx, routes& r) {
         // we don't support counter cache,
         // so currently returning a 0 for rate is ok
         return make_ready_future<json::json_return_type>(0);
+    });
+
+    cs::get_counter_hits_moving_avrage.set(r, [&ctx] (std::unique_ptr<request> req) {
+        // TBD
+        // FIXME
+        // See above
+        return make_ready_future<json::json_return_type>(meter_to_json(utils::rate_moving_average()));
+    });
+
+    cs::get_counter_requests_moving_avrage.set(r, [&ctx] (std::unique_ptr<request> req) {
+        // TBD
+        // FIXME
+        // See above
+        return make_ready_future<json::json_return_type>(meter_to_json(utils::rate_moving_average()));
     });
 
     cs::get_counter_size.set(r, [] (std::unique_ptr<request> req) {

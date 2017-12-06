@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -40,34 +40,84 @@
  */
 
 #include "thrift_validation.hh"
+#include "thrift/utils.hh"
+#include "db/system_keyspace.hh"
+#include <regex>
+#include "utils/fb_utilities.hh"
+
+using namespace thrift;
+using namespace ::apache::thrift;
 
 namespace thrift_validation {
 
-void validate_key(schema_ptr schema_, const bytes& key) {
-    throw std::runtime_error("NOT IMPLEMENTED");
-#if 0
-        if (key == null || key.remaining() == 0)
-        {
-            throw new org.apache.cassandra.exceptions.InvalidRequestException("Key may not be empty");
-        }
+void validate_key(const schema& s, const bytes_view& k) {
+    if (k.empty()) {
+        throw make_exception<InvalidRequestException>("Key may not be empty");
+    }
 
-        // check that key can be handled by FBUtilities.writeShortByteArray
-        if (key.remaining() > FBUtilities.MAX_UNSIGNED_SHORT)
-        {
-            throw new org.apache.cassandra.exceptions.InvalidRequestException("Key length of " + key.remaining() +
-                                                                              " is longer than maximum of " +
-                                                                              FBUtilities.MAX_UNSIGNED_SHORT);
-        }
+    auto max = static_cast<uint32_t>(utils::fb_utilities::MAX_UNSIGNED_SHORT);
+    if (k.size() > max) {
+        throw make_exception<InvalidRequestException>("Key length of %d is longer than maximum of %d", k.size(), max);
+    }
 
-        try
-        {
-            metadata.getKeyValidator().validate(key);
-        }
-        catch (MarshalException e)
-        {
-            throw new org.apache.cassandra.exceptions.InvalidRequestException(e.getMessage());
-        }
-#endif
+    // FIXME: implement
+    //s.partition_key_type()->validate(k);
+}
+
+void validate_keyspace_not_system(const std::string& keyspace) {
+    std::string name;
+    name.resize(keyspace.length());
+    std::transform(keyspace.begin(), keyspace.end(), name.begin(), ::tolower);
+    if (is_system_keyspace(name)) {
+        throw make_exception<InvalidRequestException>("system keyspace is not user-modifiable");
+    }
+}
+
+void validate_ks_def(const KsDef& ks_def) {
+    validate_keyspace_not_system(ks_def.name);
+    std::regex name_regex("\\w+");
+    if (!std::regex_match(ks_def.name, name_regex)) {
+        throw make_exception<InvalidRequestException>("\"%s\" is not a valid keyspace name", ks_def.name);
+    }
+    if (ks_def.name.length() > schema::NAME_LENGTH) {
+        throw make_exception<InvalidRequestException>("Keyspace names shouldn't be more than %d characters long (got \"%s\")", schema::NAME_LENGTH, ks_def.name);
+    }
+}
+
+void validate_cf_def(const CfDef& cf_def) {
+    std::regex name_regex("\\w+");
+    if (!std::regex_match(cf_def.name, name_regex)) {
+        throw make_exception<InvalidRequestException>("\"%s\" is not a valid column family name", cf_def.name);
+    }
+    if (cf_def.name.length() > schema::NAME_LENGTH) {
+        throw make_exception<InvalidRequestException>("Keyspace names shouldn't be more than %d characters long (got \"%s\")", schema::NAME_LENGTH, cf_def.name);
+    }
+}
+
+void validate_column_name(const std::string& name) {
+    auto max_name_length = static_cast<uint32_t>(utils::fb_utilities::MAX_UNSIGNED_SHORT);
+    if (name.size() > max_name_length) {
+        throw make_exception<InvalidRequestException>("column name length must not be greater than %s", max_name_length);
+    }
+    if (name.empty()) {
+        throw make_exception<InvalidRequestException>("column name must not be empty");
+    }
+}
+
+void validate_column_names(const std::vector<std::string>& names) {
+    for (auto&& name : names) {
+        validate_column_name(name);
+    }
+}
+
+void validate_column(const Column& col, const column_definition& def) {
+    if (!col.__isset.value) {
+        throw make_exception<InvalidRequestException>("Column value is required");
+    }
+    if (!col.__isset.timestamp) {
+        throw make_exception<InvalidRequestException>("Column timestamp is required");
+    }
+    def.type->validate(to_bytes_view(col.value));
 }
 
 }

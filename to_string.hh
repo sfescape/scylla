@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -25,12 +25,10 @@
 #include <vector>
 #include <sstream>
 #include <unordered_set>
+#include <set>
+#include <experimental/optional>
 
-template<typename PrintableRange>
-static inline
-sstring join(sstring delimiter, const PrintableRange& items) {
-    return join(delimiter, items.begin(), items.end());
-}
+#include "seastarx.hh"
 
 template<typename Iterator>
 static inline
@@ -46,11 +44,33 @@ sstring join(sstring delimiter, Iterator begin, Iterator end) {
     return oss.str();
 }
 
+template<typename PrintableRange>
+static inline
+sstring join(sstring delimiter, const PrintableRange& items) {
+    return join(delimiter, items.begin(), items.end());
+}
+
+namespace std {
+
 template<typename Printable>
 static inline
 sstring
 to_string(const std::vector<Printable>& items) {
     return "[" + join(", ", items) + "]";
+}
+
+template<typename Printable>
+static inline
+sstring
+to_string(const std::set<Printable>& items) {
+    return "{" + join(", ", items) + "}";
+}
+
+template<typename Printable>
+static inline
+sstring
+to_string(const std::unordered_set<Printable>& items) {
+    return "{" + join(", ", items) + "}";
 }
 
 template<typename Printable>
@@ -64,4 +84,32 @@ template <typename T>
 std::ostream& operator<<(std::ostream& os, const std::unordered_set<T>& items) {
     os << "{" << join(", ", items) << "}";
     return os;
+}
+
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const std::set<T>& items) {
+    os << "{" << join(", ", items) << "}";
+    return os;
+}
+
+template<typename T, size_t N>
+std::ostream& operator<<(std::ostream& os, const std::array<T, N>& items) {
+    os << "{" << join(", ", items) << "}";
+    return os;
+}
+
+namespace experimental {
+
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const std::experimental::optional<T>& opt) {
+    if (opt) {
+        os << "{" << *opt << "}";
+    } else {
+        os << "{}";
+    }
+    return os;
+}
+
+}
+
 }

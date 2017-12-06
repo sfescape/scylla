@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -24,12 +24,13 @@
 #include "core/sstring.hh"
 #include "core/enum.hh"
 #include "log.hh"
+#include "seastarx.hh"
 
 namespace unimplemented {
 
 static thread_local std::unordered_map<cause, bool> _warnings;
 
-static logging::logger logger("unimplemented");
+static logging::logger ulogger("unimplemented");
 
 std::ostream& operator<<(std::ostream& out, cause c) {
     switch(c) {
@@ -46,7 +47,6 @@ std::ostream& operator<<(std::ostream& out, cause c) {
         case cause::TOKEN_RESTRICTION: return out << "TOKEN_RESTRICTION";
         case cause::LEGACY_COMPOSITE_KEYS: return out << "LEGACY_COMPOSITE_KEYS";
         case cause::COLLECTION_RANGE_TOMBSTONES: return out << "COLLECTION_RANGE_TOMBSTONES";
-        case cause::RANGE_QUERIES: return out << "RANGE_QUERIES";
         case cause::RANGE_DELETES: return out << "RANGE_DELETES";
         case cause::THRIFT: return out << "THRIFT";
         case cause::VALIDATION: return out << "VALIDATION";
@@ -58,15 +58,20 @@ std::ostream& operator<<(std::ostream& out, cause c) {
         case cause::SUPER: return out << "SUPER";
         case cause::WRAP_AROUND: return out << "WRAP_AROUND";
         case cause::STORAGE_SERVICE: return out << "STORAGE_SERVICE";
+        case cause::API: return out << "API";
+        case cause::SCHEMA_CHANGE: return out << "SCHEMA_CHANGE";
+        case cause::MIXED_CF: return out << "MIXED_CF";
+        case cause::VIEWS: return out << "MATERIALIZED_VIEWS";
+        case cause::ROLES: return out << "ROLES";
     }
-    assert(0);
+    abort();
 }
 
 void warn(cause c) {
     auto i = _warnings.find(c);
     if (i == _warnings.end()) {
         _warnings.insert({c, true});
-        logger.debug("{}", c);
+        ulogger.debug("{}", c);
     }
 }
 

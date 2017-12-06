@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2014 Cloudius Systems
+ * Copyright (C) 2014 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -46,7 +46,7 @@
 #include "service/storage_proxy.hh"
 #include "cql3/query_options.hh"
 
-namespace transport {
+namespace cql_transport {
 
 namespace messages {
 
@@ -57,6 +57,9 @@ class result_message;
 }
 
 namespace cql3 {
+
+class metadata;
+shared_ptr<const metadata> make_empty_metadata();
 
 class cql_statement {
 public:
@@ -70,7 +73,7 @@ public:
      *
      * @param state the current client state
      */
-    virtual void check_access(const service::client_state& state) = 0;
+    virtual future<> check_access(const service::client_state& state) = 0;
 
     /**
      * Perform additional validation required by the statment.
@@ -86,7 +89,7 @@ public:
      * @param state the current query state
      * @param options options for this query (consistency, variables, pageSize, ...)
      */
-    virtual future<::shared_ptr<transport::messages::result_message>>
+    virtual future<::shared_ptr<cql_transport::messages::result_message>>
         execute(distributed<service::storage_proxy>& proxy, service::query_state& state, const query_options& options) = 0;
 
     /**
@@ -94,10 +97,23 @@ public:
      *
      * @param state the current query state
      */
-    virtual future<::shared_ptr<transport::messages::result_message>>
+    virtual future<::shared_ptr<cql_transport::messages::result_message>>
         execute_internal(distributed<service::storage_proxy>& proxy, service::query_state& state, const query_options& options) = 0;
 
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const = 0;
+
+    virtual bool depends_on_keyspace(const sstring& ks_name) const = 0;
+
+    virtual bool depends_on_column_family(const sstring& cf_name) const = 0;
+
+    virtual shared_ptr<const metadata> get_result_metadata() const = 0;
+};
+
+class cql_statement_no_metadata : public cql_statement {
+public:
+    virtual shared_ptr<const metadata> get_result_metadata() const override {
+        return make_empty_metadata();
+    }
 };
 
 }

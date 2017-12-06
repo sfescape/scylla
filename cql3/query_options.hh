@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2014 Cloudius Systems
+ * Copyright (C) 2014 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -41,6 +41,7 @@
 
 #pragma once
 
+#include <seastar/util/gcc6-concepts.hh>
 #include "timestamp.hh"
 #include "bytes.hh"
 #include "db/consistency_level.hh"
@@ -48,7 +49,8 @@
 #include "service/pager/paging_state.hh"
 #include "cql3/column_specification.hh"
 #include "cql3/column_identifier.hh"
-#include "serialization_format.hh"
+#include "cql3/values.hh"
+#include "cql_serialization_format.hh"
 
 namespace cql3 {
 
@@ -69,53 +71,88 @@ public:
 private:
     const db::consistency_level _consistency;
     const std::experimental::optional<std::vector<sstring_view>> _names;
-    std::vector<bytes_opt> _values;
-    std::vector<bytes_view_opt> _value_views;
+    std::vector<cql3::raw_value> _values;
+    std::vector<cql3::raw_value_view> _value_views;
     mutable std::vector<std::vector<int8_t>> _temporaries;
     const bool _skip_metadata;
     const specific_options _options;
-    const int32_t _protocol_version; // transient
-    serialization_format _serialization_format;
+    cql_serialization_format _cql_serialization_format;
     std::experimental::optional<std::vector<query_options>> _batch_options;
+
+private:
+    /**
+     * @brief Batch query_options constructor.
+     *
+     * Requirements:
+     *   - @tparam OneMutationDataRange has a begin() and end() iterators.
+     *   - The values of @tparam OneMutationDataRange are of either raw_value_view or raw_value types.
+     *
+     * @param o Base query_options object. query_options objects for each statement in the batch will derive the values from it.
+     * @param values_ranges a vector of values ranges for each statement in the batch.
+     */
+    template<typename OneMutationDataRange>
+    GCC6_CONCEPT( requires requires (OneMutationDataRange range) {
+         std::begin(range);
+         std::end(range);
+    } && ( requires (OneMutationDataRange range) { { *range.begin() } -> raw_value_view; } ||
+           requires (OneMutationDataRange range) { { *range.begin() } -> raw_value; } ) )
+    explicit query_options(query_options&& o, std::vector<OneMutationDataRange> values_ranges);
+
 public:
     query_options(query_options&&) = default;
     query_options(const query_options&) = delete;
 
     explicit query_options(db::consistency_level consistency,
                            std::experimental::optional<std::vector<sstring_view>> names,
-                           std::vector<bytes_opt> values,
-                           std::vector<bytes_view_opt> value_views,
+                           std::vector<cql3::raw_value> values,
                            bool skip_metadata,
                            specific_options options,
-                           int32_t protocol_version,
-                           serialization_format sf);
+                           cql_serialization_format sf);
     explicit query_options(db::consistency_level consistency,
                            std::experimental::optional<std::vector<sstring_view>> names,
-                           std::vector<bytes_view_opt> value_views,
+                           std::vector<cql3::raw_value> values,
+                           std::vector<cql3::raw_value_view> value_views,
                            bool skip_metadata,
                            specific_options options,
-                           int32_t protocol_version,
-                           serialization_format sf);
-
+                           cql_serialization_format sf);
     explicit query_options(db::consistency_level consistency,
-                           std::vector<std::vector<bytes_view_opt>> value_views,
+                           std::experimental::optional<std::vector<sstring_view>> names,
+                           std::vector<cql3::raw_value_view> value_views,
                            bool skip_metadata,
                            specific_options options,
-                           int32_t protocol_version,
-                           serialization_format sf);
+                           cql_serialization_format sf);
 
-    // Batch query_options constructor
-    explicit query_options(query_options&&, std::vector<std::vector<bytes_view_opt>> value_views);
+    /**
+     * @brief Batch query_options factory.
+     *
+     * Requirements:
+     *   - @tparam OneMutationDataRange has a begin() and end() iterators.
+     *   - The values of @tparam OneMutationDataRange are of either raw_value_view or raw_value types.
+     *
+     * @param o Base query_options object. query_options objects for each statement in the batch will derive the values from it.
+     * @param values_ranges a vector of values ranges for each statement in the batch.
+     */
+    template<typename OneMutationDataRange>
+    GCC6_CONCEPT( requires requires (OneMutationDataRange range) {
+         std::begin(range);
+         std::end(range);
+    } && ( requires (OneMutationDataRange range) { { *range.begin() } -> raw_value_view; } ||
+           requires (OneMutationDataRange range) { { *range.begin() } -> raw_value; } ) )
+    static query_options make_batch_options(query_options&& o, std::vector<OneMutationDataRange> values_ranges) {
+        return query_options(std::move(o), std::move(values_ranges));
+    }
 
     // It can't be const because of prepare()
     static thread_local query_options DEFAULT;
 
     // forInternalUse
-    explicit query_options(std::vector<bytes_opt> values);
+    explicit query_options(std::vector<cql3::raw_value> values);
+    explicit query_options(db::consistency_level, std::vector<cql3::raw_value> values, specific_options options = specific_options::DEFAULT);
+    explicit query_options(std::unique_ptr<query_options>, ::shared_ptr<service::pager::paging_state> paging_state);
 
     db::consistency_level get_consistency() const;
-    bytes_view_opt get_value_at(size_t idx) const;
-    bytes_view_opt make_temporary(bytes_opt value) const;
+    cql3::raw_value_view get_value_at(size_t idx) const;
+    cql3::raw_value_view make_temporary(cql3::raw_value value) const;
     size_t get_values_count() const;
     bool skip_metadata() const;
     /**  The pageSize for this query. Will be <= 0 if not relevant for the query.  */
@@ -130,11 +167,30 @@ public:
      * a native protocol request (i.e. it's been allocated locally or by CQL-over-thrift).
      */
     int get_protocol_version() const;
-    serialization_format get_serialization_format() const;
+    cql_serialization_format get_cql_serialization_format() const;
     // Mainly for the sake of BatchQueryOptions
     const specific_options& get_specific_options() const;
     const query_options& for_statement(size_t i) const;
     void prepare(const std::vector<::shared_ptr<column_specification>>& specs);
+private:
+    void fill_value_views();
 };
+
+template<typename OneMutationDataRange>
+GCC6_CONCEPT( requires requires (OneMutationDataRange range) {
+     std::begin(range);
+     std::end(range);
+} && ( requires (OneMutationDataRange range) { { *range.begin() } -> raw_value_view; } ||
+       requires (OneMutationDataRange range) { { *range.begin() } -> raw_value; } ) )
+query_options::query_options(query_options&& o, std::vector<OneMutationDataRange> values_ranges)
+    : query_options(std::move(o))
+{
+    std::vector<query_options> tmp;
+    tmp.reserve(values_ranges.size());
+    std::transform(values_ranges.begin(), values_ranges.end(), std::back_inserter(tmp), [this](auto& values_range) {
+        return query_options(_consistency, {}, std::move(values_range), _skip_metadata, _options, _cql_serialization_format);
+    });
+    _batch_options = std::move(tmp);
+}
 
 }

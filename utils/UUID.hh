@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * Copyright 2015 Cloudius Systems.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -26,12 +26,13 @@
 #include <stdint.h>
 #include <cassert>
 #include <array>
-#include <iostream>
+#include <iosfwd>
 
 #include "core/sstring.hh"
 #include "core/print.hh"
 #include "net/byteorder.hh"
 #include "bytes.hh"
+#include "hashing.hh"
 #include "utils/serialization.hh"
 
 namespace utils {
@@ -45,6 +46,7 @@ public:
     UUID(int64_t most_sig_bits, int64_t least_sig_bits)
         : most_sig_bits(most_sig_bits), least_sig_bits(least_sig_bits) {}
     explicit UUID(const sstring& uuid_string) : UUID(sstring_view(uuid_string)) { }
+    explicit UUID(const char * s) : UUID(sstring_view(s)) {}
     explicit UUID(sstring_view uuid_string);
 
     int64_t get_most_significant_bits() const {
@@ -93,28 +95,54 @@ public:
 
     bool operator<(const UUID& v) const {
          if (most_sig_bits != v.most_sig_bits) {
-             return most_sig_bits < v.most_sig_bits;
+             return uint64_t(most_sig_bits) < uint64_t(v.most_sig_bits);
          } else {
-             return least_sig_bits < v.least_sig_bits;
+             return uint64_t(least_sig_bits) < uint64_t(v.least_sig_bits);
          }
     }
 
-    bytes to_bytes() const {
-        bytes b(bytes::initialized_later(),16);
+    bool operator>(const UUID& v) const {
+        return v < *this;
+    }
+
+    bool operator<=(const UUID& v) const {
+        return !(*this > v);
+    }
+
+    bool operator>=(const UUID& v) const {
+        return !(*this < v);
+    }
+
+    bytes serialize() const {
+        bytes b(bytes::initialized_later(), serialized_size());
         auto i = b.begin();
-        serialize_int64(i, most_sig_bits);
-        serialize_int64(i, least_sig_bits);
+        serialize(i);
         return b;
     }
 
-    void serialize(bytes::iterator& out) const;
-    static UUID deserialize(bytes_view& v);
-    size_t serialized_size() const;
+    static size_t serialized_size() noexcept {
+        return 16;
+    }
+
+    template <typename CharOutputIterator>
+    void serialize(CharOutputIterator& out) const {
+        serialize_int64(out, most_sig_bits);
+        serialize_int64(out, least_sig_bits);
+    }
 };
 
 UUID make_random_uuid();
 
 }
+
+template<>
+struct appending_hash<utils::UUID> {
+    template<typename Hasher>
+    void operator()(Hasher& h, const utils::UUID& id) const {
+        feed_hash(h, id.get_most_significant_bits());
+        feed_hash(h, id.get_least_significant_bits());
+    }
+};
 
 namespace std {
 template<>

@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -38,6 +38,8 @@
  * You should have received a copy of the GNU General Public License
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
+
+#include <boost/range/adaptor/transformed.hpp>
 
 #include "cql3/selection/selection.hh"
 #include "cql3/selection/selector_factories.hh"
@@ -63,7 +65,8 @@ selection::selection(schema_ptr schema,
 query::partition_slice::option_set selection::get_query_options() {
     query::partition_slice::option_set opts;
 
-    opts.set_if<query::partition_slice::option::send_timestamp_and_expiry>(_collect_timestamps || _collect_TTLs);
+    opts.set_if<query::partition_slice::option::send_timestamp>(_collect_timestamps);
+    opts.set_if<query::partition_slice::option::send_expiry>(_collect_TTLs);
 
     opts.set_if<query::partition_slice::option::send_partition_key>(
         std::any_of(_columns.begin(), _columns.end(),
@@ -112,11 +115,11 @@ protected:
             _current.clear();
         }
 
-        virtual std::vector<bytes_opt> get_output_row(serialization_format sf) override {
+        virtual std::vector<bytes_opt> get_output_row(cql_serialization_format sf) override {
             return std::move(_current);
         }
 
-        virtual void add_input_row(serialization_format sf, result_set_builder& rs) override {
+        virtual void add_input_row(cql_serialization_format sf, result_set_builder& rs) override {
             _current = std::move(*rs.current);
         }
 
@@ -125,7 +128,7 @@ protected:
         }
     };
 
-    std::unique_ptr<selectors> new_selectors() {
+    std::unique_ptr<selectors> new_selectors() const override {
         return std::make_unique<simple_selectors>();
     }
 };
@@ -180,7 +183,7 @@ protected:
             return _factories->contains_only_aggregate_functions();
         }
 
-        virtual std::vector<bytes_opt> get_output_row(serialization_format sf) override {
+        virtual std::vector<bytes_opt> get_output_row(cql_serialization_format sf) override {
             std::vector<bytes_opt> output_row;
             output_row.reserve(_selectors.size());
             for (auto&& s : _selectors) {
@@ -189,27 +192,23 @@ protected:
             return output_row;
         }
 
-        virtual void add_input_row(serialization_format sf, result_set_builder& rs) {
+        virtual void add_input_row(cql_serialization_format sf, result_set_builder& rs) {
             for (auto&& s : _selectors) {
                 s->add_input(sf, rs);
             }
         }
     };
 
-    std::unique_ptr<selectors> new_selectors() {
+    std::unique_ptr<selectors> new_selectors() const override  {
         return std::make_unique<selectors_with_processing>(_factories);
     }
 };
 
 ::shared_ptr<selection> selection::wildcard(schema_ptr schema) {
-    std::vector<const column_definition*> cds;
-    auto& columns = schema->all_columns_in_select_order();
-    cds.reserve(columns.size());
-    for (auto& c : columns) {
-        if (!c.is_compact_value() || !c.name().empty()) {
-            cds.emplace_back(&c);
-        }
-    }
+    auto columns = schema->all_columns_in_select_order();
+    auto cds = boost::copy_range<std::vector<const column_definition*>>(columns | boost::adaptors::transformed([](const column_definition& c) {
+        return &c;
+    }));
     return simple_selection::make(schema, std::move(cds), true);
 }
 
@@ -231,7 +230,7 @@ uint32_t selection::add_column_for_ordering(const column_definition& c) {
             raw_selector::to_selectables(raw_selectors, schema), db, schema, defs);
 
     auto metadata = collect_metadata(schema, raw_selectors, *factories);
-    if (processes_selection(raw_selectors)) {
+    if (processes_selection(raw_selectors) || raw_selectors.size() != defs.size()) {
         return ::make_shared<selection_with_processing>(schema, std::move(defs), std::move(metadata), std::move(factories));
     } else {
         return ::make_shared<simple_selection>(schema, std::move(defs), std::move(metadata), false);
@@ -252,11 +251,11 @@ selection::collect_metadata(schema_ptr schema, const std::vector<::shared_ptr<ra
     return r;
 }
 
-result_set_builder::result_set_builder(selection& s, db_clock::time_point now, serialization_format sf)
+result_set_builder::result_set_builder(const selection& s, gc_clock::time_point now, cql_serialization_format sf)
     : _result_set(std::make_unique<result_set>(::make_shared<metadata>(*(s.get_result_metadata()))))
     , _selectors(s.new_selectors())
     , _now(now)
-    , _serialization_format(sf)
+    , _cql_serialization_format(sf)
 {
     if (s._collect_timestamps) {
         _timestamps.resize(s._columns.size(), 0);
@@ -289,23 +288,22 @@ void result_set_builder::add(const column_definition& def, const query::result_a
         gc_clock::duration ttl_left(-1);
         expiry_opt e = c.expiry();
         if (e) {
-            ttl_left = *e - to_gc_clock(_now);
+            ttl_left = *e - _now;
         }
         _ttls[current->size() - 1] = ttl_left.count();
     }
 }
 
-void result_set_builder::add(const column_definition& def, collection_mutation::view c) {
-    auto&& ctype = static_cast<const collection_type_impl*>(def.type.get());
-    current->emplace_back(ctype->to_value(c, _serialization_format));
+void result_set_builder::add_collection(const column_definition& def, bytes_view c) {
+    current->emplace_back(to_bytes(c));
     // timestamps, ttls meaningless for collections
 }
 
 void result_set_builder::new_row() {
     if (current) {
-        _selectors->add_input_row(_serialization_format, *this);
+        _selectors->add_input_row(_cql_serialization_format, *this);
         if (!_selectors->is_aggregate()) {
-            _result_set->add_row(_selectors->get_output_row(_serialization_format));
+            _result_set->add_row(_selectors->get_output_row(_cql_serialization_format));
             _selectors->reset();
         }
         current->clear();
@@ -319,15 +317,104 @@ void result_set_builder::new_row() {
 
 std::unique_ptr<result_set> result_set_builder::build() {
     if (current) {
-        _selectors->add_input_row(_serialization_format, *this);
-        _result_set->add_row(_selectors->get_output_row(_serialization_format));
+        _selectors->add_input_row(_cql_serialization_format, *this);
+        _result_set->add_row(_selectors->get_output_row(_cql_serialization_format));
         _selectors->reset();
         current = std::experimental::nullopt;
     }
     if (_result_set->empty() && _selectors->is_aggregate()) {
-        _result_set->add_row(_selectors->get_output_row(_serialization_format));
+        _result_set->add_row(_selectors->get_output_row(_cql_serialization_format));
     }
     return std::move(_result_set);
+}
+
+result_set_builder::visitor::visitor(
+        cql3::selection::result_set_builder& builder, const schema& s,
+        const selection& selection)
+        : _builder(builder), _schema(s), _selection(selection), _row_count(0) {
+}
+
+void result_set_builder::visitor::add_value(const column_definition& def,
+        query::result_row_view::iterator_type& i) {
+    if (def.type->is_multi_cell()) {
+        auto cell = i.next_collection_cell();
+        if (!cell) {
+            _builder.add_empty();
+            return;
+        }
+        _builder.add_collection(def, *cell);
+    } else {
+        auto cell = i.next_atomic_cell();
+        if (!cell) {
+            _builder.add_empty();
+            return;
+        }
+        _builder.add(def, *cell);
+    }
+}
+
+void result_set_builder::visitor::accept_new_partition(const partition_key& key,
+        uint32_t row_count) {
+    _partition_key = key.explode(_schema);
+    _row_count = row_count;
+}
+
+void result_set_builder::visitor::accept_new_partition(uint32_t row_count) {
+    _row_count = row_count;
+}
+
+void result_set_builder::visitor::accept_new_row(const clustering_key& key,
+        const query::result_row_view& static_row,
+        const query::result_row_view& row) {
+    _clustering_key = key.explode(_schema);
+    accept_new_row(static_row, row);
+}
+
+void result_set_builder::visitor::accept_new_row(
+        const query::result_row_view& static_row,
+        const query::result_row_view& row) {
+    auto static_row_iterator = static_row.iterator();
+    auto row_iterator = row.iterator();
+    _builder.new_row();
+    for (auto&& def : _selection.get_columns()) {
+        switch (def->kind) {
+        case column_kind::partition_key:
+            _builder.add(_partition_key[def->component_index()]);
+            break;
+        case column_kind::clustering_key:
+            if (_clustering_key.size() > def->component_index()) {
+                _builder.add(_clustering_key[def->component_index()]);
+            } else {
+                _builder.add({});
+            }
+            break;
+        case column_kind::regular_column:
+            add_value(*def, row_iterator);
+            break;
+        case column_kind::static_column:
+            add_value(*def, static_row_iterator);
+            break;
+        default:
+            assert(0);
+        }
+    }
+}
+
+void result_set_builder::visitor::accept_partition_end(
+        const query::result_row_view& static_row) {
+    if (_row_count == 0) {
+        _builder.new_row();
+        auto static_row_iterator = static_row.iterator();
+        for (auto&& def : _selection.get_columns()) {
+            if (def->is_partition_key()) {
+                _builder.add(_partition_key[def->component_index()]);
+            } else if (def->is_static()) {
+                add_value(*def, static_row_iterator);
+            } else {
+                _builder.add_empty();
+            }
+        }
+    }
 }
 
 api::timestamp_type result_set_builder::timestamp_of(size_t idx) {
@@ -339,12 +426,6 @@ int32_t result_set_builder::ttl_of(size_t idx) {
 }
 
 bytes_opt result_set_builder::get_value(data_type t, query::result_atomic_cell_view c) {
-    if (t->is_counter()) {
-        fail(unimplemented::cause::COUNTERS);
-#if 0
-                ByteBufferUtil.bytes(CounterContext.instance().total(c.value()))
-#endif
-    }
     return {to_bytes(c.value())};
 }
 

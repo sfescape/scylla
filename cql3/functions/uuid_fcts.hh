@@ -17,9 +17,9 @@
  */
 
 /*
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  *
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -53,8 +53,8 @@ inline
 shared_ptr<function>
 make_uuid_fct() {
     return make_native_scalar_function<false>("uuid", uuid_type, {},
-            [] (serialization_format sf, const std::vector<bytes_opt>& parameters) -> bytes_opt {
-        return {uuid_type->decompose(boost::any(utils::make_random_uuid()))};
+            [] (cql_serialization_format sf, const std::vector<bytes_opt>& parameters) -> bytes_opt {
+        return {uuid_type->decompose(utils::make_random_uuid())};
     });
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -21,20 +21,20 @@
 
 #pragma once
 
-#include <net/byteorder.hh>
 #include "core/future.hh"
 #include "core/iostream.hh"
 #include "sstables/exceptions.hh"
+#include <seastar/core/byteorder.hh>
 
 template<typename T>
 static inline T consume_be(temporary_buffer<char>& p) {
-    T i = net::ntoh(*unaligned_cast<const T*>(p.get()));
+    T i = read_be<T>(p.get());
     p.trim_front(sizeof(T));
     return i;
 }
 
 namespace data_consumer {
-enum class proceed { yes, no };
+enum class proceed { no, yes };
 
 template <typename StateProcessor>
 class continuous_data_consumer {
@@ -44,6 +44,7 @@ class continuous_data_consumer {
     };
 protected:
     input_stream<char> _input;
+    uint64_t _stream_position;
     // remaining length of input to read (if <0, continue until end of file).
     int64_t _remain;
 
@@ -144,7 +145,7 @@ protected:
     }
 
     inline void process_buffer(temporary_buffer<char>& data) {
-        while (__builtin_expect((_prestate != prestate::NONE), 0)) {
+        if (__builtin_expect((_prestate != prestate::NONE), 0)) {
             do_process_buffer(data);
         }
     }
@@ -217,8 +218,8 @@ private:
         state_processor().verify_end_state();
     }
 public:
-    continuous_data_consumer(input_stream<char>&& input, uint64_t maxlen)
-            : _input(std::move(input)), _remain(maxlen) {}
+    continuous_data_consumer(input_stream<char>&& input, uint64_t start, uint64_t maxlen)
+            : _input(std::move(input)), _stream_position(start), _remain(maxlen) {}
 
     template<typename Consumer>
     future<> consume_input(Consumer& c) {
@@ -236,6 +237,16 @@ public:
     inline proceed process(temporary_buffer<char>& data) {
         while (data || non_consuming()) {
             process_buffer(data);
+            // If _prestate is set to something other than prestate::NONE
+            // after process_buffer was called, it means that data wasn't
+            // enough to complete the prestate. That can happen specially
+            // when reading a large buf. Thefore, we need to ask caller
+            // to read more data until prestate is completed.
+            if (__builtin_expect((_prestate != prestate::NONE), 0)) {
+                // assert that data was all consumed by process_buffer.
+                assert(data.size() == 0);
+                return proceed::yes;
+            }
             auto ret = state_processor().process_state(data);
             if (__builtin_expect(ret == proceed::no, 0)) {
                 return ret;
@@ -252,10 +263,12 @@ public:
             // We received more data than we actually care about, so process
             // the beginning of the buffer, and return the rest to the stream
             auto segment = data.share(0, _remain);
-            process(segment);
+            auto ret = process(segment);
             data.trim_front(_remain - segment.size());
-            _remain -= (_remain - segment.size());
-            if (_remain == 0) {
+            auto len = _remain - segment.size();
+            _remain -= len;
+            _stream_position += len;
+            if (_remain == 0 && ret == proceed::yes) {
                 verify_end_state();
             }
             return make_ready_future<unconsumed_remainder>(std::move(data));
@@ -266,6 +279,7 @@ public:
         } else {
             // We can process the entire buffer (if the consumer wants to).
             auto orig_data_size = data.size();
+            _stream_position += data.size();
             if (process(data) == proceed::yes) {
                 assert(data.size() == 0);
                 if (_remain >= 0) {
@@ -276,9 +290,38 @@ public:
                 if (_remain >= 0) {
                     _remain -= orig_data_size - data.size();
                 }
+                _stream_position -= data.size();
                 return make_ready_future<unconsumed_remainder>(std::move(data));
             }
         }
+    }
+
+    future<> fast_forward_to(size_t begin, size_t end) {
+        assert(begin >= _stream_position);
+        auto n = begin - _stream_position;
+        _stream_position = begin;
+
+        assert(end >= _stream_position);
+        _remain = end - _stream_position;
+
+        _prestate = prestate::NONE;
+        return _input.skip(n);
+    }
+
+    future<> skip_to(size_t begin) {
+        return fast_forward_to(begin, _stream_position + _remain);
+    }
+
+    uint64_t position() const {
+        return _stream_position;
+    }
+
+    bool eof() const {
+        return _remain == 0;
+    }
+
+    future<> close() {
+        return _input.close();
     }
 };
 }

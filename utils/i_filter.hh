@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -48,6 +48,16 @@ namespace utils {
 struct i_filter;
 using filter_ptr = std::unique_ptr<i_filter>;
 
+class hashed_key {
+private:
+    std::array<uint64_t, 2> _hash;
+public:
+    hashed_key(std::array<uint64_t, 2> h) : _hash(h) {}
+    std::array<uint64_t, 2> hash() const { return _hash; };
+};
+
+hashed_key make_hashed_key(bytes_view key);
+
 // FIXME: serialize() and serialized_size() not implemented. We should only be serializing to
 // disk, not in the wire.
 struct i_filter {
@@ -55,8 +65,11 @@ struct i_filter {
 
     virtual void add(const bytes_view& key) = 0;
     virtual bool is_present(const bytes_view& key) = 0;
+    virtual bool is_present(hashed_key) = 0;
     virtual void clear() = 0;
     virtual void close() = 0;
+
+    virtual size_t memory_size() = 0;
 
     /**
      * @return The smallest bloom_filter that can provide the given false
@@ -65,11 +78,11 @@ struct i_filter {
      *         Asserts that the given probability can be satisfied using this
      *         filter.
      */
-    static filter_ptr get_filter(long num_elements, double max_false_pos_prob);
+    static filter_ptr get_filter(int64_t num_elements, double max_false_pos_prob);
     /**
      * @return A bloom_filter with the lowest practical false positive
      *         probability for the given number of elements.
      */
-    static filter_ptr get_filter(long num_elements, int target_buckets_per_elem);
+    static filter_ptr get_filter(int64_t num_elements, int target_buckets_per_elem);
 };
 }

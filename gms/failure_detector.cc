@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -36,6 +36,7 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <boost/range/adaptor/map.hpp>
 #include "gms/failure_detector.hh"
 #include "gms/gossiper.hh"
 #include "gms/i_failure_detector.hh"
@@ -43,56 +44,40 @@
 #include "gms/endpoint_state.hh"
 #include "gms/application_state.hh"
 #include "gms/inet_address.hh"
+#include "service/storage_service.hh"
+#include "log.hh"
 #include <iostream>
 #include <chrono>
 
 namespace gms {
 
-extern logging::logger logger;
+static logging::logger logger("failure_detector");
+
+constexpr std::chrono::milliseconds failure_detector::DEFAULT_MAX_PAUSE;
 
 using clk = arrival_window::clk;
 
 static clk::duration get_initial_value() {
-#if 0
-    String newvalue = System.getProperty("cassandra.fd_initial_value_ms");
-    if (newvalue == null)
-    {
-        return Gossiper.intervalInMillis * 2;
-    }
-    else
-    {
-        logger.info("Overriding FD INITIAL_VALUE to {}ms", newvalue);
-        return Integer.parseInt(newvalue);
-    }
-#endif
-    warn(unimplemented::cause::GOSSIP);
-    return std::chrono::seconds(2);
+    auto& cfg = service::get_local_storage_service().db().local().get_config();
+    return std::chrono::milliseconds(cfg.fd_initial_value_ms());
 }
 
 clk::duration arrival_window::get_max_interval() {
-#if 0
-    sstring newvalue = System.getProperty("cassandra.fd_max_interval_ms");
-    if (newvalue == null)
-    {
-        return failure_detector.INITIAL_VALUE_NANOS;
-    }
-    else
-    {
-        logger.info("Overriding FD MAX_INTERVAL to {}ms", newvalue);
-        return TimeUnit.NANOSECONDS.convert(Integer.parseInt(newvalue), TimeUnit.MILLISECONDS);
-    }
-#endif
-    warn(unimplemented::cause::GOSSIP);
-    return get_initial_value();
+    auto& cfg = service::get_local_storage_service().db().local().get_config();
+    return std::chrono::milliseconds(cfg.fd_max_interval_ms());
 }
 
-void arrival_window::add(clk::time_point value) {
+static clk::duration get_min_interval() {
+    return gossiper::INTERVAL;
+}
+
+void arrival_window::add(clk::time_point value, const gms::inet_address& ep) {
     if (_tlast > clk::time_point::min()) {
         auto inter_arrival_time = value - _tlast;
-        if (inter_arrival_time <= get_max_interval()) {
+        if (inter_arrival_time <= get_max_interval() && inter_arrival_time >= get_min_interval()) {
             _arrival_intervals.add(inter_arrival_time.count());
         } else  {
-            logger.debug("failure_detector: Ignoring interval time of {}", inter_arrival_time.count());
+            logger.debug("failure_detector: Ignoring interval time of {} for {}, mean={}, size={}", inter_arrival_time.count(), ep, mean(), size());
         }
     } else {
         // We use a very large initial interval since the "right" average depends on the cluster size
@@ -142,39 +127,27 @@ std::map<sstring, sstring> failure_detector::get_simple_states() {
         auto& state = entry.second;
         std::stringstream ss;
         ss << ep;
-        if (state.is_alive())
+
+        if (state.is_alive()) {
             nodes_status.emplace(sstring(ss.str()), "UP");
-        else
+        } else {
             nodes_status.emplace(sstring(ss.str()), "DOWN");
+        }
     }
     return nodes_status;
 }
 
 int failure_detector::get_down_endpoint_count() {
-    int count = 0;
-    for (auto& entry : get_local_gossiper().endpoint_state_map) {
-        auto& state = entry.second;
-        if (!state.is_alive()) {
-            count++;
-        }
-    }
-    return count;
+    return get_local_gossiper().endpoint_state_map.size() - get_up_endpoint_count();
 }
 
 int failure_detector::get_up_endpoint_count() {
-    int count = 0;
-    for (auto& entry : get_local_gossiper().endpoint_state_map) {
-        auto& state = entry.second;
-        if (state.is_alive()) {
-            count++;
-        }
-    }
-    return count;
+    return boost::count_if(get_local_gossiper().endpoint_state_map | boost::adaptors::map_values, std::mem_fn(&endpoint_state::is_alive));
 }
 
 sstring failure_detector::get_endpoint_state(sstring address) {
     std::stringstream ss;
-    auto eps = get_local_gossiper().get_endpoint_state_for_endpoint(inet_address(address));
+    auto* eps = get_local_gossiper().get_endpoint_state_for_endpoint_ptr(inet_address(address));
     if (eps) {
         append_endpoint_state(ss, *eps);
         return sstring(ss.str());
@@ -183,30 +156,31 @@ sstring failure_detector::get_endpoint_state(sstring address) {
     }
 }
 
-void failure_detector::append_endpoint_state(std::stringstream& ss, endpoint_state& state) {
+void failure_detector::append_endpoint_state(std::stringstream& ss, const endpoint_state& state) {
     ss << "  generation:" << state.get_heart_beat_state().get_generation() << "\n";
     ss << "  heartbeat:" << state.get_heart_beat_state().get_heart_beat_version() << "\n";
-    for (auto& entry : state.get_application_state_map()) {
+    for (const auto& entry : state.get_application_state_map()) {
         auto& app_state = entry.first;
-        auto& value = entry.second;
+        auto& versioned_val = entry.second;
         if (app_state == application_state::TOKENS) {
             continue;
         }
-        // FIXME: Add operator<< for application_state
-        ss << "  " << int32_t(app_state) << ":" << value.value << "\n";
+        ss << "  " << app_state << ":" << versioned_val.version << ":" << versioned_val.value << "\n";
+    }
+    const auto& app_state_map = state.get_application_state_map();
+    if (app_state_map.count(application_state::TOKENS)) {
+        ss << "  TOKENS:" << app_state_map.at(application_state::TOKENS).version << ":<hidden>\n";
+    } else {
+        ss << "  TOKENS: not present" << "\n";
     }
 }
 
 void failure_detector::set_phi_convict_threshold(double phi) {
-    // FIXME
-    // DatabaseDescriptor.setPhiConvictThreshold(phi);
+    _phi = phi;
 }
 
 double failure_detector::get_phi_convict_threshold() {
-    // FIXME: phi_convict_threshold must be between 5 and 16"
-    // return DatabaseDescriptor.getPhiConvictThreshold();
-    warn(unimplemented::cause::GOSSIP);
-    return 8;
+    return _phi;
 }
 
 bool failure_detector::is_alive(inet_address ep) {
@@ -220,10 +194,10 @@ void failure_detector::report(inet_address ep) {
     if (it == _arrival_samples.end()) {
         // avoid adding an empty ArrivalWindow to the Map
         auto heartbeat_window = arrival_window(SAMPLE_SIZE);
-        heartbeat_window.add(now);
+        heartbeat_window.add(now, ep);
         _arrival_samples.emplace(ep, heartbeat_window);
     } else {
-        it->second.add(now);
+        it->second.add(now, ep);
     }
 }
 
@@ -235,8 +209,23 @@ void failure_detector::interpret(inet_address ep) {
     }
     arrival_window& hb_wnd = it->second;
     auto now = clk::now();
+    if (!_last_interpret) {
+        *_last_interpret = now;
+    }
+    auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - *_last_interpret);
+    *_last_interpret = now;
+    if (diff > get_max_local_pause()) {
+        logger.warn("Not marking nodes down due to local pause of {} > {} (milliseconds)", diff.count(), get_max_local_pause().count());
+        _last_paused = now;
+        return;
+    }
+    if (clk::now() - _last_paused < get_max_local_pause()) {
+        logger.debug("Still not marking nodes down due to local pause");
+        return;
+    }
     double phi = hb_wnd.phi(now);
     logger.trace("failure_detector: PHI for {} : {}", ep, phi);
+    logger.trace("failure_detector: phi_convict_threshold={}", _phi);
 
     if (PHI_FACTOR * phi > get_phi_convict_threshold()) {
         logger.trace("failure_detector: notifying listeners that {} is down", ep);
@@ -269,7 +258,6 @@ void failure_detector::unregister_failure_detection_event_listener(i_failure_det
 }
 
 std::ostream& operator<<(std::ostream& os, const failure_detector& x) {
-    os << "----------- failure_detector:    -----------\n";
     for (auto& entry : x._arrival_samples) {
         const inet_address& ep = entry.first;
         const arrival_window& win = entry.second;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 Cloudius Systems, Ltd.
+ * Copyright (C) 2014 ScyllaDB
  */
 
 /*
@@ -50,10 +50,23 @@ functions::init() {
         if (type == cql3_type::varchar || type == cql3_type::blob) {
             continue;
         }
+        // counters are not supported yet
+        if (type->is_counter()) {
+            warn(unimplemented::cause::COUNTERS);
+            continue;
+        }
 
         declare(make_to_blob_function(type->get_type()));
         declare(make_from_blob_function(type->get_type()));
     }
+    declare(aggregate_fcts::make_count_function<int8_t>());
+    declare(aggregate_fcts::make_max_function<int8_t>());
+    declare(aggregate_fcts::make_min_function<int8_t>());
+
+    declare(aggregate_fcts::make_count_function<int16_t>());
+    declare(aggregate_fcts::make_max_function<int16_t>());
+    declare(aggregate_fcts::make_min_function<int16_t>());
+
     declare(aggregate_fcts::make_count_function<int32_t>());
     declare(aggregate_fcts::make_max_function<int32_t>());
     declare(aggregate_fcts::make_min_function<int32_t>());
@@ -61,6 +74,26 @@ functions::init() {
     declare(aggregate_fcts::make_count_function<int64_t>());
     declare(aggregate_fcts::make_max_function<int64_t>());
     declare(aggregate_fcts::make_min_function<int64_t>());
+
+    declare(aggregate_fcts::make_count_function<boost::multiprecision::cpp_int>());
+    declare(aggregate_fcts::make_max_function<boost::multiprecision::cpp_int>());
+    declare(aggregate_fcts::make_min_function<boost::multiprecision::cpp_int>());
+
+    declare(aggregate_fcts::make_count_function<big_decimal>());
+    declare(aggregate_fcts::make_max_function<big_decimal>());
+    declare(aggregate_fcts::make_min_function<big_decimal>());
+
+    declare(aggregate_fcts::make_count_function<float>());
+    declare(aggregate_fcts::make_max_function<float>());
+    declare(aggregate_fcts::make_min_function<float>());
+
+    declare(aggregate_fcts::make_count_function<double>());
+    declare(aggregate_fcts::make_max_function<double>());
+    declare(aggregate_fcts::make_min_function<double>());
+
+    declare(aggregate_fcts::make_count_function<sstring>());
+    declare(aggregate_fcts::make_max_function<sstring>());
+    declare(aggregate_fcts::make_min_function<sstring>());
 
     //FIXME:
     //declare(aggregate_fcts::make_count_function<bytes>());
@@ -71,20 +104,22 @@ functions::init() {
 
     declare(make_varchar_as_blob_fct());
     declare(make_blob_as_varchar_fct());
+    declare(aggregate_fcts::make_sum_function<int8_t>());
+    declare(aggregate_fcts::make_sum_function<int16_t>());
     declare(aggregate_fcts::make_sum_function<int32_t>());
     declare(aggregate_fcts::make_sum_function<int64_t>());
+    declare(aggregate_fcts::make_sum_function<float>());
+    declare(aggregate_fcts::make_sum_function<double>());
+    declare(aggregate_fcts::make_sum_function<boost::multiprecision::cpp_int>());
+    declare(aggregate_fcts::make_sum_function<big_decimal>());
+    declare(aggregate_fcts::make_avg_function<int8_t>());
+    declare(aggregate_fcts::make_avg_function<int16_t>());
     declare(aggregate_fcts::make_avg_function<int32_t>());
     declare(aggregate_fcts::make_avg_function<int64_t>());
-#if 0
-    declare(AggregateFcts.sumFunctionForFloat);
-    declare(AggregateFcts.sumFunctionForDouble);
-    declare(AggregateFcts.sumFunctionForDecimal);
-    declare(AggregateFcts.sumFunctionForVarint);
-    declare(AggregateFcts.avgFunctionForFloat);
-    declare(AggregateFcts.avgFunctionForDouble);
-    declare(AggregateFcts.avgFunctionForVarint);
-    declare(AggregateFcts.avgFunctionForDecimal);
-#endif
+    declare(aggregate_fcts::make_avg_function<float>());
+    declare(aggregate_fcts::make_avg_function<double>());
+    declare(aggregate_fcts::make_avg_function<boost::multiprecision::cpp_int>());
+    declare(aggregate_fcts::make_avg_function<big_decimal>());
 
     // also needed for smp:
 #if 0
@@ -294,10 +329,10 @@ function_call::collect_marker_specification(shared_ptr<variable_specifications> 
 
 shared_ptr<terminal>
 function_call::bind(const query_options& options) {
-    return make_terminal(_fun, to_bytes_opt(bind_and_get(options)), options.get_serialization_format());
+    return make_terminal(_fun, cql3::raw_value::make_value(bind_and_get(options)), options.get_cql_serialization_format());
 }
 
-bytes_view_opt
+cql3::raw_value_view
 function_call::bind_and_get(const query_options& options) {
     std::vector<bytes_opt> buffers;
     buffers.reserve(_terms.size());
@@ -310,12 +345,12 @@ function_call::bind_and_get(const query_options& options) {
         }
         buffers.push_back(std::move(to_bytes_opt(val)));
     }
-    auto result = execute_internal(options.get_serialization_format(), *_fun, std::move(buffers));
-    return options.make_temporary(result);
+    auto result = execute_internal(options.get_cql_serialization_format(), *_fun, std::move(buffers));
+    return options.make_temporary(cql3::raw_value::make_value(result));
 }
 
 bytes_opt
-function_call::execute_internal(serialization_format sf, scalar_function& fun, std::vector<bytes_opt> params) {
+function_call::execute_internal(cql_serialization_format sf, scalar_function& fun, std::vector<bytes_opt> params) {
     bytes_opt result = fun.execute(sf, params);
     try {
         // Check the method didn't lied on it's declared return type
@@ -323,7 +358,7 @@ function_call::execute_internal(serialization_format sf, scalar_function& fun, s
             fun.return_type()->validate(*result);
         }
         return result;
-    } catch (marshal_exception e) {
+    } catch (marshal_exception& e) {
         throw runtime_exception(sprint("Return of function %s (%s) is not a valid value for its declared return type %s",
                                        fun, to_hex(result),
                                        *fun.return_type()->as_cql3_type()
@@ -342,7 +377,7 @@ function_call::contains_bind_marker() const {
 }
 
 shared_ptr<terminal>
-function_call::make_terminal(shared_ptr<function> fun, bytes_opt result, serialization_format sf)  {
+function_call::make_terminal(shared_ptr<function> fun, cql3::raw_value result, cql_serialization_format sf)  {
     if (!dynamic_pointer_cast<const collection_type_impl>(fun->return_type())) {
         return ::make_shared<constants::value>(std::move(result));
     }
@@ -408,7 +443,7 @@ function_call::raw::prepare(database& db, const sstring& keyspace, ::shared_ptr<
     // If all parameters are terminal and the function is pure, we can
     // evaluate it now, otherwise we'd have to wait execution time
     if (all_terminal && scalar_fun->is_pure()) {
-        return make_terminal(scalar_fun, execute(*scalar_fun, parameters), query_options::DEFAULT.get_serialization_format());
+        return make_terminal(scalar_fun, cql3::raw_value::make_value(execute(*scalar_fun, parameters)), query_options::DEFAULT.get_cql_serialization_format());
     } else {
         return ::make_shared<function_call>(scalar_fun, parameters);
     }
@@ -421,10 +456,10 @@ function_call::raw::execute(scalar_function& fun, std::vector<shared_ptr<term>> 
     for (auto&& t : parameters) {
         assert(dynamic_cast<terminal*>(t.get()));
         auto&& param = static_cast<terminal*>(t.get())->get(query_options::DEFAULT);
-        buffers.push_back(std::move(param));
+        buffers.push_back(std::move(to_bytes_opt(param)));
     }
 
-    return execute_internal(serialization_format::internal(), fun, buffers);
+    return execute_internal(cql_serialization_format::internal(), fun, buffers);
 }
 
 assignment_testable::test_result

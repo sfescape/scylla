@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  *
  */
 
@@ -27,7 +27,7 @@
 
 namespace sstables {
 
-future<> remove_by_toc_name(sstring sstable_toc_name);
+future<> remove_by_toc_name(sstring sstable_toc_name, const io_error_handler& error_handler = sstable_write_error_handler);
 
 }
 

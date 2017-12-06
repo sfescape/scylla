@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -28,7 +28,7 @@
 #include <string>
 #include "core/sstring.hh"
 #include "utils/serialization.hh"
-#include "types.hh"
+#include "marshal_exception.hh"
 
 namespace utils {
 
@@ -62,28 +62,13 @@ UUID::UUID(sstring_view uuid) {
     boost::erase_all(uuid_string, "-");
     auto size = uuid_string.size() / 2;
     if (size != 16) {
-        throw marshal_exception();
+        throw marshal_exception(sprint("UUID string size mismatch: '%s'", uuid));
     }
     sstring most = sstring(uuid_string.begin(), uuid_string.begin() + size);
     sstring least = sstring(uuid_string.begin() + size, uuid_string.end());
     int base = 16;
     this->most_sig_bits = std::stoull(most, nullptr, base);
     this->least_sig_bits = std::stoull(least, nullptr, base);
-}
-
-void UUID::serialize(bytes::iterator& out) const {
-   serialize_int64(out, most_sig_bits);
-   serialize_int64(out, least_sig_bits);
-}
-
-UUID UUID::deserialize(bytes_view& v) {
-    auto most = read_simple<int64_t>(v);
-    auto least = read_simple<int64_t>(v);
-    return UUID(most, least);
-}
-
-size_t UUID::serialized_size() const {
-    return serialize_int64_size + serialize_int64_size;
 }
 
 }

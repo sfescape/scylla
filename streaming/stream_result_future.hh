@@ -14,8 +14,8 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -72,9 +72,10 @@ private:
     shared_ptr<stream_coordinator> _coordinator;
     std::vector<stream_event_handler*> _event_listeners;
     promise<stream_state> _done;
+    lowres_clock::time_point _start_time;
 public:
-    stream_result_future(UUID plan_id_, sstring description_, bool keep_ss_table_levels_, bool is_receiving)
-        : stream_result_future(plan_id_, description_, make_shared<stream_coordinator>(1, keep_ss_table_levels_, is_receiving)) {
+    stream_result_future(UUID plan_id_, sstring description_, bool is_receiving)
+        : stream_result_future(plan_id_, description_, make_shared<stream_coordinator>(is_receiving)) {
         // Note: Origin sets connections_per_host = 0 on receiving side, We set 1 to
         // refelct the fact that we actaully create one conncetion to the initiator.
     }
@@ -90,7 +91,8 @@ public:
     stream_result_future(UUID plan_id_, sstring description_, shared_ptr<stream_coordinator> coordinator_)
         : plan_id(std::move(plan_id_))
         , description(std::move(description_))
-        , _coordinator(coordinator_) {
+        , _coordinator(coordinator_)
+        , _start_time(lowres_clock::now()) {
         // if there is no session to listen to, we immediately set result for returning
         if (!_coordinator->is_receiving() && !_coordinator->has_active_sessions()) {
             _done.set_value(get_current_state());
@@ -101,12 +103,8 @@ public:
     shared_ptr<stream_coordinator> get_coordinator() { return _coordinator; };
 
 public:
-    static future<stream_state> init(UUID plan_id_, sstring description_, std::vector<stream_event_handler*> listeners_, shared_ptr<stream_coordinator> coordinator_);
-    static void init_receiving_side(int session_index, UUID plan_id,
-        sstring description, inet_address from, bool keep_ss_table_level);
-
-private:
-    static shared_ptr<stream_result_future> create_and_register(UUID plan_id_, sstring description_, shared_ptr<stream_coordinator> coordinator_);
+    static future<stream_state> init_sending_side(UUID plan_id_, sstring description_, std::vector<stream_event_handler*> listeners_, shared_ptr<stream_coordinator> coordinator_);
+    static shared_ptr<stream_result_future> init_receiving_side(UUID plan_id, sstring description, inet_address from);
 
 public:
     void add_event_listener(stream_event_handler* listener) {
@@ -118,23 +116,6 @@ public:
      * @return Current snapshot of streaming progress.
      */
     stream_state get_current_state();
-#if 0
-
-    @Override
-    public boolean equals(Object o)
-    {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        StreamResultFuture that = (StreamResultFuture) o;
-        return planId.equals(that.planId);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return planId.hashCode();
-    }
-#endif
 
     void handle_session_prepared(shared_ptr<stream_session> session);
 

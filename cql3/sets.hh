@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -78,9 +78,9 @@ public:
         value(std::set<bytes, serialized_compare> elements)
                 : _elements(std::move(elements)) {
         }
-        static value from_serialized(bytes_view v, set_type type, serialization_format sf);
-        virtual bytes_opt get(const query_options& options) override;
-        virtual bytes get_with_protocol_version(serialization_format sf) override;
+        static value from_serialized(bytes_view v, set_type type, cql_serialization_format sf);
+        virtual cql3::raw_value get(const query_options& options) override;
+        virtual bytes get_with_protocol_version(cql_serialization_format sf) override;
         bool equals(set_type st, const value& v);
         virtual sstring to_string() const override;
     };
@@ -112,7 +112,7 @@ public:
         setter(const column_definition& column, shared_ptr<term> t)
                 : operation(column, std::move(t)) {
         }
-        virtual void execute(mutation& m, const exploded_clustering_prefix& row_key, const update_parameters& params) override;
+        virtual void execute(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params) override;
     };
 
     class adder : public operation {
@@ -120,9 +120,9 @@ public:
         adder(const column_definition& column, shared_ptr<term> t)
             : operation(column, std::move(t)) {
         }
-        virtual void execute(mutation& m, const exploded_clustering_prefix& row_key, const update_parameters& params) override;
-        static void do_add(mutation& m, const exploded_clustering_prefix& row_key, const update_parameters& params,
-                shared_ptr<term> t, const column_definition& column);
+        virtual void execute(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params) override;
+        static void do_add(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params,
+                shared_ptr<term> value, const column_definition& column);
     };
 
     // Note that this is reused for Map subtraction too (we subtract a set from a map)
@@ -131,7 +131,14 @@ public:
         discarder(const column_definition& column, shared_ptr<term> t)
             : operation(column, std::move(t)) {
         }
-        virtual void execute(mutation& m, const exploded_clustering_prefix& row_key, const update_parameters& params) override;
+        virtual void execute(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params) override;
+    };
+
+    class element_discarder : public operation {
+    public:
+        element_discarder(const column_definition& column, shared_ptr<term> t)
+            : operation(column, std::move(t)) { }
+        virtual void execute(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params) override;
     };
 };
 

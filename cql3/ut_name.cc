@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -56,7 +56,7 @@ void ut_name::set_keyspace(sstring keyspace) {
     _ks_name = std::experimental::optional<sstring>{keyspace};
 }
 
-sstring ut_name::get_keyspace() const {
+const sstring& ut_name::get_keyspace() const {
     return _ks_name.value();
 }
 

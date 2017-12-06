@@ -16,9 +16,9 @@
  * limitations under the License.
  */
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -113,6 +113,8 @@ public:
             database& db, schema_ptr schema,
             ::shared_ptr<variable_specifications> bound_names, bool isKey)
                     override;
+
+    ::shared_ptr<relation> maybe_rename_identifier(const column_identifier::raw& from, column_identifier::raw to) override;
 
     sstring to_string() const override;
 

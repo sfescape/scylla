@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -42,21 +42,17 @@
 #include "mutation_reader.hh"
 #include "utils/UUID.hh"
 #include <vector>
+#include "range.hh"
+#include "dht/i_partitioner.hh"
 
 namespace streaming {
 
 struct stream_detail {
     using UUID = utils::UUID;
     UUID cf_id;
-    lw_shared_ptr<mutation_reader> mr;
-    int64_t estimated_keys;
-    int64_t repaired_at;
     stream_detail() = default;
-    stream_detail(UUID cf_id_, mutation_reader mr_, long estimated_keys_, long repaired_at_)
-        : cf_id(std::move(cf_id_))
-        , mr(make_lw_shared(std::move(mr_)))
-        , estimated_keys(estimated_keys_)
-        , repaired_at(repaired_at_) {
+    stream_detail(UUID cf_id_)
+        : cf_id(std::move(cf_id_)) {
     }
 };
 

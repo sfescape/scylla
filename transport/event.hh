@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -49,7 +49,7 @@
 #include <experimental/optional>
 #include <stdexcept>
 
-namespace transport {
+namespace cql_transport {
 
 class event {
 public:

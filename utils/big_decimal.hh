@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -30,7 +30,12 @@ private:
     int32_t _scale;
     boost::multiprecision::cpp_int _unscaled_value;
 public:
+    enum class rounding_mode {
+        HALF_EVEN,
+    };
+
     big_decimal(sstring_view text);
+    big_decimal() : big_decimal(0, 0) {}
     big_decimal(int32_t scale, boost::multiprecision::cpp_int unscaled_value)
         : _scale(scale), _unscaled_value(unscaled_value)
     { }
@@ -41,4 +46,13 @@ public:
     sstring to_string() const;
 
     int compare(const big_decimal& other) const;
+
+    big_decimal& operator+=(const big_decimal& other);
+    big_decimal div(const ::uint64_t y, const rounding_mode mode) const;
+    friend bool operator<(const big_decimal& x, const big_decimal& y) { return x.compare(y) < 0; }
+    friend bool operator<=(const big_decimal& x, const big_decimal& y) { return x.compare(y) <= 0; }
+    friend bool operator==(const big_decimal& x, const big_decimal& y) { return x.compare(y) == 0; }
+    friend bool operator!=(const big_decimal& x, const big_decimal& y) { return x.compare(y) != 0; }
+    friend bool operator>=(const big_decimal& x, const big_decimal& y) { return x.compare(y) >= 0; }
+    friend bool operator>(const big_decimal& x, const big_decimal& y) { return x.compare(y) > 0; }
 };

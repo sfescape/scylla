@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -22,6 +22,10 @@
 #pragma once
 
 #include "bytes.hh"
+#include "utils/chunked_vector.hh"
+#include <seastar/core/enum.hh>
+#include <boost/variant/variant.hpp>
+#include <boost/variant/get.hpp>
 #include <unordered_map>
 #include <type_traits>
 #include <deque>
@@ -53,12 +57,58 @@ struct disk_string_view {
 template <typename Size, typename Members>
 struct disk_array {
     static_assert(std::is_integral<Size>::value, "Length type must be convertible to integer");
-    std::deque<Members> elements;
+    utils::chunked_vector<Members> elements;
 };
 
 template <typename Size, typename Key, typename Value>
 struct disk_hash {
     std::unordered_map<Key, Value, std::hash<Key>> map;
+};
+
+template <typename TagType, TagType Tag, typename T>
+struct disk_tagged_union_member {
+    // stored as: tag, value-size-on-disk, value
+    using tag_type = TagType;
+    static constexpr tag_type tag() { return Tag; }
+    using type = T;
+    T value;
+};
+
+template <typename TagType, typename... Members>
+struct disk_tagged_union {
+    using variant_type = boost::variant<Members...>;
+    variant_type data;
+};
+
+// Each element of Members... is a disk_tagged_union_member<>
+template <typename TagType, typename... Members>
+struct disk_set_of_tagged_union {
+    using tag_type = TagType;
+    using key_type = std::conditional_t<std::is_enum<TagType>::value, std::underlying_type_t<TagType>, TagType>;
+    using hash_type = std::conditional_t<std::is_enum<TagType>::value, enum_hash<TagType>, TagType>;
+    using value_type = boost::variant<Members...>;
+    std::unordered_map<tag_type, value_type, hash_type> data;
+
+    template <TagType Tag, typename T>
+    T* get() {
+        // FIXME: static_assert that <Tag, T> is a member
+        auto i = data.find(Tag);
+        if (i == data.end()) {
+            return nullptr;
+        } else {
+            return &boost::get<disk_tagged_union_member<TagType, Tag, T>>(i->second).value;
+        }
+    }
+    template <TagType Tag, typename T>
+    const T* get() const {
+        return const_cast<disk_set_of_tagged_union*>(this)->get<Tag, T>();
+    }
+    template <TagType Tag, typename T>
+    void set(T&& value) {
+        data[Tag] = disk_tagged_union_member<TagType, Tag, T>{std::forward<T>(value)};
+    }
+    struct serdes;
+    static struct serdes s_serdes;
 };
 
 }

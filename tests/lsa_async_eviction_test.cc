@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -23,6 +23,7 @@
 #include <core/app-template.hh>
 #include <core/sstring.hh>
 #include <core/thread.hh>
+#include <seastar/util/defer.hh>
 
 #include "utils/managed_bytes.hh"
 #include "utils/logalloc.hh"
@@ -53,10 +54,11 @@ int main(int argc, char** argv) {
         auto objects_in_batch = app.configuration()["batch"].as<unsigned>();
 
         return seastar::async([obj_size, obj_count, objects_in_batch] {
+            chunked_fifo<managed_bytes> refs;
             logalloc::region r;
 
             with_allocator(r.allocator(), [&] {
-                std::deque<managed_bytes> refs;
+                auto clear_refs = defer([&refs] { refs.clear(); });
 
                 r.make_evictable([&] {
                     return with_allocator(r.allocator(), [&] {
@@ -69,21 +71,18 @@ int main(int argc, char** argv) {
                 });
 
                 uint64_t counter = 0;
-                bool stop = false;
+                logalloc::allocating_section alloc_sect;
+                alloc_sect.set_lsa_reserve(0);
+                alloc_sect.set_std_reserve(0);
 
-                engine().at_exit([&stop] {
-                    stop = true;
-                    return make_ready_future<>();
-                });
-
-                while (!stop) {
-                    refs.push_back(managed_bytes(managed_bytes::initialized_later(), obj_size));
+                while (counter < obj_count) {
+                    alloc_sect(r, [&] {
+                        auto obj = managed_bytes(managed_bytes::initialized_later(), obj_size);
+                        logalloc::reclaim_lock l(r);
+                        refs.push_back(std::move(obj));
+                    });
 
                     ++counter;
-
-                    if (counter >= obj_count) {
-                        break;
-                    }
 
                     if (counter % objects_in_batch == 0) {
                         print_stats();

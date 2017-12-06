@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -48,11 +48,16 @@
 #include "gms/versioned_value.hh"
 #include "gms/application_state.hh"
 #include "gms/endpoint_state.hh"
-#include "message/messaging_service.hh"
+#include "gms/feature.hh"
+#include "utils/loading_shared_values.hh"
+#include "message/messaging_service_fwd.hh"
 #include <boost/algorithm/string.hpp>
 #include <experimental/optional>
 #include <algorithm>
 #include <chrono>
+#include <set>
+#include <seastar/core/condition-variable.hh>
+#include <seastar/core/metrics_registration.hh>
 
 namespace gms {
 
@@ -76,40 +81,38 @@ class i_failure_detector;
  * Upon hearing a GossipShutdownMessage, this module will instantly mark the remote node as down in
  * the Failure Detector.
  */
-class gossiper : public i_failure_detection_event_listener, public seastar::async_sharded_service<gossiper> {
+class gossiper : public i_failure_detection_event_listener, public seastar::async_sharded_service<gossiper>, public seastar::peering_sharded_service<gossiper> {
 public:
-    using clk = std::chrono::high_resolution_clock;
+    using clk = seastar::lowres_system_clock;
 private:
-    using messaging_verb = net::messaging_verb;
-    using messaging_service = net::messaging_service;
-    using shard_id = net::messaging_service::shard_id;
-    net::messaging_service& ms() {
-        return net::get_local_messaging_service();
+    using messaging_verb = netw::messaging_verb;
+    using messaging_service = netw::messaging_service;
+    using msg_addr = netw::msg_addr;
+    netw::messaging_service& ms() {
+        return netw::get_local_messaging_service();
     }
-    class handler {
-    public:
-        future<> stop() {
-            return make_ready_future<>();
-        }
-    };
-    distributed<handler> _handlers;
     void init_messaging_service_handler();
     void uninit_messaging_service_handler();
-    future<gossip_digest_ack> handle_syn_msg(gossip_digest_syn syn_msg);
-    future<> handle_ack_msg(shard_id id, gossip_digest_ack ack_msg);
+    future<> handle_syn_msg(msg_addr from, gossip_digest_syn syn_msg);
+    future<> handle_ack_msg(msg_addr from, gossip_digest_ack ack_msg);
+    future<> handle_ack2_msg(gossip_digest_ack2 msg);
+    future<> handle_echo_msg();
+    future<> handle_shutdown_msg(inet_address from);
     static constexpr uint32_t _default_cpuid = 0;
-    shard_id get_shard_id(inet_address to) {
-        return shard_id{to, _default_cpuid};
-    }
+    msg_addr get_msg_addr(inet_address to);
     void do_sort(std::vector<gossip_digest>& g_digest_list);
-    timer<clk> _scheduled_gossip_task;
+    timer<lowres_clock> _scheduled_gossip_task;
     bool _enabled = false;
-    sstring get_cluster_name();
-    sstring get_partitioner_name();
     std::set<inet_address> _seeds_from_config;
     sstring _cluster_name;
+    semaphore _callback_running{1};
+    semaphore _apply_state_locally_semaphore{100};
 public:
-    inet_address get_broadcast_address() {
+    future<> timer_callback_lock() { return _callback_running.wait(); }
+    void timer_callback_unlock() { _callback_running.signal(); }
+    sstring get_cluster_name();
+    sstring get_partitioner_name();
+    inet_address get_broadcast_address() const {
         return utils::fb_utilities::get_broadcast_address();
     }
     void set_cluster_name(sstring name);
@@ -118,11 +121,31 @@ public:
 public:
     static clk::time_point inline now() { return clk::now(); }
 public:
+    using endpoint_locks_map = utils::loading_shared_values<inet_address, semaphore>;
+    struct endpoint_permit {
+        endpoint_locks_map::entry_ptr _ptr;
+        semaphore_units<> _units;
+    };
+    future<endpoint_permit> lock_endpoint(inet_address);
+public:
     /* map where key is the endpoint and value is the state associated with the endpoint */
     std::unordered_map<inet_address, endpoint_state> endpoint_state_map;
+    // Used for serializing changes to endpoint_state_map and running of associated change listeners.
+    endpoint_locks_map endpoint_locks;
 
-    const std::vector<sstring> DEAD_STATES = { versioned_value::REMOVING_TOKEN, versioned_value::REMOVED_TOKEN,
-                                               versioned_value::STATUS_LEFT, versioned_value::HIBERNATE };
+    const std::vector<sstring> DEAD_STATES = {
+        versioned_value::REMOVING_TOKEN,
+        versioned_value::REMOVED_TOKEN,
+        versioned_value::STATUS_LEFT,
+        versioned_value::HIBERNATE
+    };
+    const std::vector<sstring> SILENT_SHUTDOWN_STATES = {
+        versioned_value::REMOVING_TOKEN,
+        versioned_value::REMOVED_TOKEN,
+        versioned_value::STATUS_LEFT,
+        versioned_value::HIBERNATE,
+        versioned_value::STATUS_BOOTSTRAPPING,
+    };
     static constexpr std::chrono::milliseconds INTERVAL{1000};
     static constexpr std::chrono::hours A_VERY_LONG_TIME{24 * 3};
 
@@ -134,14 +157,52 @@ public:
 private:
 
     std::random_device _random;
-    /* subscribers for interest in EndpointState change */
-    std::list<i_endpoint_state_change_subscriber*> _subscribers;
+    std::default_random_engine _random_engine{_random()};
+
+    /**
+     * subscribers for interest in EndpointState change
+     *
+     * @class subscribers_list - allows modifications of the list at the same
+     *        time as it's being iterated using for_each() method.
+     */
+    class subscribers_list {
+        std::list<shared_ptr<i_endpoint_state_change_subscriber>> _l;
+    public:
+        auto push_back(shared_ptr<i_endpoint_state_change_subscriber> s) {
+            return _l.push_back(s);
+        }
+
+       /**
+        * Remove the element pointing to the same object as the given one.
+        * @param s shared_ptr pointing to the same object as one of the elements
+        *          in the list.
+        */
+        void remove(shared_ptr<i_endpoint_state_change_subscriber> s) {
+            _l.remove(s);
+        }
+
+        /**
+         * Make a copy of the current list and iterate over a copy.
+         *
+         * @param Func - function to apply on each list element
+         */
+        template <typename Func>
+        void for_each(Func&& f) {
+            auto list_copy(_l);
+
+            std::for_each(list_copy.begin(), list_copy.end(), std::forward<Func>(f));
+        }
+    } _subscribers;
 
     /* live member set */
-    std::set<inet_address> _live_endpoints;
+    std::vector<inet_address> _live_endpoints;
+    std::list<inet_address> _live_endpoints_just_added;
+
+    /* nodes are being marked as alive */
+    std::unordered_set<inet_address> _pending_mark_alive_endpoints;
 
     /* unreachable member set */
-    std::map<inet_address, clk::time_point> _unreachable_endpoints;
+    std::unordered_map<inet_address, clk::time_point> _unreachable_endpoints;
 
     /* initial seeds for joining the cluster */
     std::set<inet_address> _seeds;
@@ -158,10 +219,19 @@ private:
 
     clk::time_point _last_processed_message_at = now();
 
-    std::unordered_map<inet_address, endpoint_state> _shadow_endpoint_state_map;
-    std::set<inet_address> _shadow_live_endpoints;
+    std::unordered_map<inet_address, clk::time_point> _shadow_unreachable_endpoints;
+    std::vector<inet_address> _shadow_live_endpoints;
 
     void run();
+    // Replicates given endpoint_state to all other shards.
+    // The state state doesn't have to be kept alive around until completes.
+    future<> replicate(inet_address, const endpoint_state&);
+    // Replicates "states" from "src" to all other shards.
+    // "src" and "states" must be kept alive until completes and must not change.
+    future<> replicate(inet_address, const std::map<application_state, versioned_value>& src, const std::vector<application_state>& states);
+    // Replicates given value to all other shards.
+    // The value must be kept alive until completes and not change.
+    future<> replicate(inet_address, application_state key, const versioned_value& value);
 public:
     gossiper();
 
@@ -175,14 +245,14 @@ public:
      *
      * @param subscriber module which implements the IEndpointStateChangeSubscriber
      */
-    void register_(i_endpoint_state_change_subscriber* subscriber);
+    void register_(shared_ptr<i_endpoint_state_change_subscriber> subscriber);
 
     /**
      * Unregister interest for state changes.
      *
      * @param subscriber module which implements the IEndpointStateChangeSubscriber
      */
-    void unregister_(i_endpoint_state_change_subscriber* subscriber);
+    void unregister_(shared_ptr<i_endpoint_state_change_subscriber> subscriber);
 
     std::set<inet_address> get_live_members();
 
@@ -304,9 +374,11 @@ public:
 public:
     bool is_known_endpoint(inet_address endpoint);
 
-    int get_current_generation_number(inet_address endpoint);
+    future<int> get_current_generation_number(inet_address endpoint);
+    future<int> get_current_heart_beat_version(inet_address endpoint);
 
     bool is_gossip_only_member(inet_address endpoint);
+    bool is_safe_for_bootstrap(inet_address endpoint);
 private:
     /**
      * Returns true if the chosen target was also a seed. False otherwise
@@ -315,10 +387,10 @@ private:
      * @param epSet   a set of endpoint from which a random endpoint is chosen.
      * @return true if the chosen endpoint is also a seed.
      */
-    future<bool> send_gossip(gossip_digest_syn message, std::set<inet_address> epset);
+    future<> send_gossip(gossip_digest_syn message, std::set<inet_address> epset);
 
-    /* Sends a Gossip message to a live member and returns true if the recipient was a seed */
-    future<bool> do_gossip_to_live_member(gossip_digest_syn message);
+    /* Sends a Gossip message to a live member */
+    future<> do_gossip_to_live_member(gossip_digest_syn message, inet_address ep);
 
     /* Sends a Gossip message to an unreachable member */
     future<> do_gossip_to_unreachable_member(gossip_digest_syn message);
@@ -331,7 +403,15 @@ private:
 public:
     clk::time_point get_expire_time_for_endpoint(inet_address endpoint);
 
-    std::experimental::optional<endpoint_state> get_endpoint_state_for_endpoint(inet_address ep);
+    const endpoint_state* get_endpoint_state_for_endpoint_ptr(inet_address ep) const;
+    endpoint_state& get_endpoint_state(inet_address ep);
+
+    endpoint_state* get_endpoint_state_for_endpoint_ptr(inet_address ep);
+
+    const versioned_value* get_application_state_ptr(inet_address endpoint, application_state appstate) const;
+
+    // Use with caution, copies might be expensive (see #764)
+    stdx::optional<endpoint_state> get_endpoint_state_for_endpoint(inet_address ep) const;
 
     // removes ALL endpoint states; should only be called after shadow gossip
     void reset_endpoint_state_map();
@@ -339,8 +419,6 @@ public:
     std::unordered_map<inet_address, endpoint_state>& get_endpoint_states();
 
     bool uses_host_id(inet_address endpoint);
-
-    bool uses_vnodes(inet_address endpoint);
 
     utils::UUID get_host_id(inet_address endpoint);
 
@@ -351,10 +429,10 @@ public:
      */
     int compare_endpoint_startup(inet_address addr1, inet_address addr2);
 
-    void notify_failure_detector(std::map<inet_address, endpoint_state> remoteEpStateMap);
+    void notify_failure_detector(const std::map<inet_address, endpoint_state>& remoteEpStateMap);
 
 
-    void notify_failure_detector(inet_address endpoint, endpoint_state remote_endpoint_state);
+    void notify_failure_detector(inet_address endpoint, const endpoint_state& remote_endpoint_state);
 
 private:
     void mark_alive(inet_address addr, endpoint_state& local_state);
@@ -369,22 +447,22 @@ private:
      * @param ep      endpoint
      * @param ep_state EndpointState for the endpoint
      */
-    void handle_major_state_change(inet_address ep, endpoint_state eps);
+    void handle_major_state_change(inet_address ep, const endpoint_state& eps);
 
 public:
-    bool is_alive(inet_address ep);
+    bool is_alive(inet_address ep) const;
     bool is_dead_state(const endpoint_state& eps) const;
 
-    future<> apply_state_locally(std::map<inet_address, endpoint_state>& map);
+    future<> apply_state_locally(std::map<inet_address, endpoint_state> map);
 
 private:
-    void apply_new_states(inet_address addr, endpoint_state& local_state, endpoint_state& remote_state);
+    void apply_new_states(inet_address addr, endpoint_state& local_state, const endpoint_state& remote_state);
 
     // notify that a local application state is going to change (doesn't get triggered for remote changes)
-    void do_before_change_notifications(inet_address addr, endpoint_state& ep_state, application_state& ap_state, versioned_value& new_value);
+    void do_before_change_notifications(inet_address addr, const endpoint_state& ep_state, const application_state& ap_state, const versioned_value& new_value);
 
     // notify that an application state has changed
-    void do_on_change_notifications(inet_address addr, const application_state& state, versioned_value& value);
+    void do_on_change_notifications(inet_address addr, const application_state& state, const versioned_value& value);
     /* Request all the state for the endpoint in the g_digest */
 
     void request_all(gossip_digest& g_digest, std::vector<gossip_digest>& delta_gossip_digest_list, int remote_generation);
@@ -402,12 +480,12 @@ public:
                          std::map<inet_address, endpoint_state>& delta_ep_state_map);
 
 public:
-    future<> start(int generation_number);
+    future<> start_gossiping(int generation_number);
 
     /**
      * Start the gossiper with the generation number, preloading the map of application states before starting
      */
-    future<> start(int generation_nbr, std::map<application_state, versioned_value> preload_local_states);
+    future<> start_gossiping(int generation_nbr, std::map<application_state, versioned_value> preload_local_states);
 
 public:
     /**
@@ -428,18 +506,20 @@ public:
      */
     void add_saved_endpoint(inet_address ep);
 
-    void add_local_application_state(application_state state, versioned_value value);
+    future<> add_local_application_state(application_state state, versioned_value value);
 
-    void add_lccal_application_states(std::list<std::pair<application_state, versioned_value>> states);
-
+    // Needed by seastar::sharded
     future<> stop();
+    future<> do_stop_gossiping();
 
 public:
-    bool is_enabled();
+    bool is_enabled() const;
 
     void finish_shadow_round();
 
-    bool is_in_shadow_round();
+    bool is_in_shadow_round() const;
+
+    void goto_shadow_round();
 
 public:
     void add_expire_time_for_endpoint(inet_address endpoint, clk::time_point expire_time);
@@ -448,21 +528,59 @@ public:
 public:
     void dump_endpoint_state_map();
     void debug_show();
+public:
+    bool is_seed(const inet_address& endpoint) const;
+    bool is_shutdown(const inet_address& endpoint) const;
+    bool is_normal(const inet_address& endpoint) const;
+    bool is_silent_shutdown_state(const endpoint_state& ep_state) const;
+    void mark_as_shutdown(const inet_address& endpoint);
+    void force_newer_generation();
+public:
+    sstring get_gossip_status(const endpoint_state& ep_state) const;
+    sstring get_gossip_status(const inet_address& endpoint) const;
+public:
+    future<> wait_for_gossip_to_settle();
+private:
+    uint64_t _nr_run = 0;
+    bool _ms_registered = false;
+    bool _gossiped_to_seed = false;
+private:
+    condition_variable _features_condvar;
+    std::unordered_map<sstring, std::vector<feature*>> _registered_features;
+    friend class feature;
+    // Get features supported by a particular node
+    std::set<sstring> get_supported_features(inet_address endpoint) const;
+    // Get features supported by all the nodes this node knows about
+    std::set<sstring> get_supported_features() const;
+    // Get features supported by all the nodes listed in the address/feature map
+    static std::set<sstring> get_supported_features(std::unordered_map<gms::inet_address, sstring> peer_features_string);
+    // Wait for features are available on all nodes this node knows about
+    future<> wait_for_feature_on_all_node(std::set<sstring> features);
+    // Wait for features are available on a particular node
+    future<> wait_for_feature_on_node(std::set<sstring> features, inet_address endpoint);
+public:
+    void check_knows_remote_features(sstring local_features_string) const;
+    void check_knows_remote_features(sstring local_features_string, std::unordered_map<inet_address, sstring> peer_features_string) const;
+    void maybe_enable_features();
+    // Return true if the feature is present on the node
+    bool node_has_feature(inet_address endpoint, const feature& f) const;
+private:
+    void register_feature(feature* f);
+    void unregister_feature(feature* f);
+private:
+    seastar::metrics::metric_groups _metrics;
 };
 
 extern distributed<gossiper> _the_gossiper;
+
 inline gossiper& get_local_gossiper() {
     return _the_gossiper.local();
 }
+
 inline distributed<gossiper>& get_gossiper() {
     return _the_gossiper;
 }
 
-future<std::set<inet_address>> get_unreachable_members();
-future<std::set<inet_address>> get_live_members();
-future<int64_t> get_endpoint_downtime(inet_address ep);
-future<int> get_current_generation_number(inet_address ep);
-future<> unsafe_assassinate_endpoint(sstring ep);
-future<> assassinate_endpoint(sstring ep);
+future<> stop_gossiping();
 
 } // namespace gms

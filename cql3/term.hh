@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -45,6 +45,7 @@
 #include "variable_specifications.hh"
 #include "cql3/assignment_testable.hh"
 #include "cql3/query_options.hh"
+#include "cql3/values.hh"
 #include "types.hh"
 
 namespace cql3 {
@@ -89,7 +90,7 @@ public:
      * object between the bind and the get (note that we still want to be able
      * to separate bind and get for collections).
      */
-    virtual bytes_view_opt bind_and_get(const query_options& options) = 0;
+    virtual cql3::raw_value_view bind_and_get(const query_options& options) = 0;
 
     /**
      * Whether or not that term contains at least one bind marker.
@@ -103,7 +104,7 @@ public:
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const = 0;
 
     virtual sstring to_string() const {
-        return sprint("term@%p", this);
+        return sprint("term@%p", static_cast<const void*>(this));
     }
 
     friend std::ostream& operator<<(std::ostream& out, const term& t) {
@@ -187,9 +188,9 @@ public:
     /**
      * @return the serialized value of this terminal.
      */
-    virtual bytes_opt get(const query_options& options) = 0;
+    virtual cql3::raw_value get(const query_options& options) = 0;
 
-    virtual bytes_view_opt bind_and_get(const query_options& options) override {
+    virtual cql3::raw_value_view bind_and_get(const query_options& options) override {
         return options.make_temporary(get(options));
     }
 
@@ -205,7 +206,7 @@ class collection_terminal {
 public:
     virtual ~collection_terminal() {}
     /** Gets the value of the collection when serialized with the given protocol version format */
-    virtual bytes get_with_protocol_version(serialization_format sf) = 0;
+    virtual bytes get_with_protocol_version(cql_serialization_format sf) = 0;
 };
 
 /**
@@ -224,12 +225,12 @@ public:
         return false;
     }
 
-    virtual bytes_view_opt bind_and_get(const query_options& options) override {
+    virtual cql3::raw_value_view bind_and_get(const query_options& options) override {
         auto t = bind(options);
         if (t) {
             return options.make_temporary(t->get(options));
         }
-        return {};
+        return cql3::raw_value_view::make_null();
     };
 };
 

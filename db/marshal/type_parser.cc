@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -50,16 +50,20 @@ namespace db {
 
 namespace marshal {
 
-type_parser::type_parser(const sstring& str, size_t idx)
-    : _str{str}
+type_parser::type_parser(sstring_view str, size_t idx)
+    : _str{str.begin(), str.end()}
     , _idx{idx}
 { }
 
-type_parser::type_parser(const sstring& str)
+type_parser::type_parser(sstring_view str)
     : type_parser{str, 0}
 { }
 
 data_type type_parser::parse(const sstring& str) {
+    return type_parser(sstring_view(str)).parse();
+}
+
+data_type type_parser::parse(sstring_view str) {
     return type_parser(str).parse();
 }
 
@@ -72,6 +76,13 @@ data_type type_parser::do_parse(bool multicell)
     skip_blank();
 
     sstring name = read_next_identifier();
+    if (name.empty()) {
+        if (!is_eos()) {
+            throw std::runtime_error("unknown type: " + _str);
+        }
+        return bytes_type;
+    }
+
     if (_str[_idx] == ':') {
         _idx++;
         try {
@@ -118,7 +129,51 @@ std::vector<data_type> type_parser::get_type_parameters(bool multicell)
 
         try {
             list.emplace_back(do_parse(multicell));
-        } catch (exceptions::syntax_exception e) {
+        } catch (exceptions::syntax_exception& e) {
+            // FIXME
+#if 0
+            SyntaxException ex = new SyntaxException(String.format("Exception while parsing '%s' around char %d", str, idx));
+            ex.initCause(e);
+#endif
+            throw e;
+        }
+    }
+    throw exceptions::syntax_exception(sprint("Syntax error parsing '%s' at char %d: unexpected end of string", _str, _idx));
+}
+
+std::tuple<sstring, bytes, std::vector<bytes>, std::vector<data_type>> type_parser::get_user_type_parameters()
+{
+    if (is_eos() || _str[_idx] != '(') {
+        throw std::logic_error("internal error");
+    }
+
+    ++_idx; // skipping '('
+
+    skip_blank_and_comma();
+    sstring keyspace = read_next_identifier();
+    skip_blank_and_comma();
+    bytes name = from_hex(read_next_identifier());
+
+    std::vector<bytes> field_names;
+    std::vector<data_type> field_types;
+
+    while (skip_blank_and_comma())
+    {
+        if (_str[_idx] == ')') {
+            ++_idx;
+            return std::make_tuple(std::move(keyspace), std::move(name), std::move(field_names), std::move(field_types));
+        }
+
+        field_names.emplace_back(from_hex(read_next_identifier()));
+
+        if (_str[_idx] != ':') {
+            throw exceptions::syntax_exception(sprint("expecting ':' token"));
+        }
+        ++_idx;
+
+        try {
+            field_types.emplace_back(do_parse(true));
+        } catch (exceptions::syntax_exception& e) {
             // FIXME
 #if 0
             SyntaxException ex = new SyntaxException(String.format("Exception while parsing '%s' around char %d", str, idx));
@@ -185,6 +240,13 @@ data_type type_parser::get_abstract_type(const sstring& compare_with, type_parse
             throw exceptions::configuration_exception("TupleType takes at least 1 type parameter");
         }
         return tuple_type_impl::get_instance(l);
+    } else if (class_name == "org.apache.cassandra.db.marshal.UserType") {
+        sstring keyspace;
+        bytes name;
+        std::vector<bytes> field_names;
+        std::vector<data_type> field_types;
+        std::tie(keyspace, name, field_names, field_types) = parser.get_user_type_parameters();
+        return user_type_impl::get_instance(std::move(keyspace), std::move(name), std::move(field_names), std::move(field_types));
     } else {
         throw std::runtime_error("unknown type: " + class_name);
     }

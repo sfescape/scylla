@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -39,8 +39,9 @@
 #pragma once
 
 #include "core/sstring.hh"
-#include "query-request.hh"
+#include "range.hh"
 #include "dht/i_partitioner.hh"
+#include "partition_range_compat.hh"
 #include <vector>
 
 namespace streaming {
@@ -49,21 +50,22 @@ class stream_request {
 public:
     using token = dht::token;
     sstring keyspace;
-    std::vector<query::range<token>> ranges;
+    dht::token_range_vector ranges;
+    // For compatibility with <= 1.5, we send wrapping ranges (though they will never wrap).
+    std::vector<wrapping_range<token>> ranges_compat() const {
+        return compat::wrap(ranges);
+    }
     std::vector<sstring> column_families;
-    long repaired_at;
     stream_request() = default;
-    stream_request(sstring _keyspace, std::vector<query::range<token>> _ranges, std::vector<sstring> _column_families, long _repaired_at)
+    stream_request(sstring _keyspace, dht::token_range_vector _ranges, std::vector<sstring> _column_families)
         : keyspace(std::move(_keyspace))
         , ranges(std::move(_ranges))
-        , column_families(std::move(_column_families))
-        , repaired_at(_repaired_at) {
+        , column_families(std::move(_column_families)) {
+    }
+    stream_request(sstring _keyspace, std::vector<wrapping_range<token>> _ranges, std::vector<sstring> _column_families)
+        : stream_request(std::move(_keyspace), compat::unwrap(std::move(_ranges)), std::move(_column_families)) {
     }
     friend std::ostream& operator<<(std::ostream& os, const stream_request& r);
-public:
-    void serialize(bytes::iterator& out) const;
-    static stream_request deserialize(bytes_view& v);
-    size_t serialized_size() const;
 };
 
 } // namespace streaming

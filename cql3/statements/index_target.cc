@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -43,9 +43,37 @@
 #include "index_target.hh"
 #include "db/index/secondary_index.hh"
 
+namespace cql3 {
+
+namespace statements {
+
 using db::index::secondary_index;
 
-sstring cql3::statements::index_target::index_option(target_type type)  {
+const sstring index_target::target_option_name = "target";
+const sstring index_target::custom_index_option_name = "class_name";
+
+sstring index_target::as_cql_string(schema_ptr schema) const {
+    if (!schema->get_column_definition(column->name())->type->is_collection()) {
+        return column->to_cql_string();
+    }
+    return sprint("%s(%s)", to_sstring(type), column->to_cql_string());
+}
+
+index_target::target_type index_target::from_sstring(const sstring& s)
+{
+    if (s == "keys") {
+        return index_target::target_type::keys;
+    } else if (s == "entries") {
+        return index_target::target_type::keys_and_values;
+    } else if (s == "values") {
+        return index_target::target_type::values;
+    } else if (s == "full") {
+        return index_target::target_type::full;
+    }
+    throw std::runtime_error(sprint("Unknown target type: %s", s));
+}
+
+sstring index_target::index_option(target_type type) {
     switch (type) {
         case target_type::keys: return secondary_index::index_keys_option_name;
         case target_type::keys_and_values: return secondary_index::index_entries_option_name;
@@ -54,42 +82,42 @@ sstring cql3::statements::index_target::index_option(target_type type)  {
     }
 }
 
-cql3::statements::index_target::target_type
-cql3::statements::index_target::from_column_definition(const column_definition& cd) {
-    auto& opts = cd.idx_info.index_options;
-
-    if (!opts) {
-        throw std::invalid_argument("No index options");
-    }
-    if (opts->count(secondary_index::index_keys_option_name)) {
-        return target_type::keys;
-    } else if (opts->count(secondary_index::index_entries_option_name)) {
-        return target_type::keys_and_values;
-    } else if (cd.type->is_collection() && !cd.type->is_multi_cell()) {
-        return target_type::full;
-    } else {
-        return target_type::values;
-    }
-}
-
-::shared_ptr<cql3::statements::index_target::raw>
-cql3::statements::index_target::raw::values_of(::shared_ptr<column_identifier::raw> c) {
+::shared_ptr<index_target::raw>
+index_target::raw::values_of(::shared_ptr<column_identifier::raw> c) {
     return ::make_shared<raw>(c, target_type::values);
 }
-::shared_ptr<cql3::statements::index_target::raw>
-cql3::statements::index_target::raw::keys_of(::shared_ptr<column_identifier::raw> c) {
+
+::shared_ptr<index_target::raw>
+index_target::raw::keys_of(::shared_ptr<column_identifier::raw> c) {
     return ::make_shared<raw>(c, target_type::keys);
 }
-::shared_ptr<cql3::statements::index_target::raw>
-cql3::statements::index_target::raw::keys_and_values_of(::shared_ptr<column_identifier::raw> c) {
+
+::shared_ptr<index_target::raw>
+index_target::raw::keys_and_values_of(::shared_ptr<column_identifier::raw> c) {
     return ::make_shared<raw>(c, target_type::keys_and_values);
 }
-::shared_ptr<cql3::statements::index_target::raw>
-cql3::statements::index_target::raw::full_collection(::shared_ptr<column_identifier::raw> c) {
+
+::shared_ptr<index_target::raw>
+index_target::raw::full_collection(::shared_ptr<column_identifier::raw> c) {
     return ::make_shared<raw>(c, target_type::full);
 }
 
-::shared_ptr<cql3::statements::index_target>
-cql3::statements::index_target::raw::prepare(schema_ptr schema) {
+::shared_ptr<index_target>
+index_target::raw::prepare(schema_ptr schema) {
     return ::make_shared<index_target>(column->prepare_column_identifier(schema), type);
+}
+
+sstring to_sstring(index_target::target_type type)
+{
+    switch (type) {
+    case index_target::target_type::keys: return "keys";
+    case index_target::target_type::keys_and_values: return "entries";
+    case index_target::target_type::values: return "values";
+    case index_target::target_type::full: return "full";
+    }
+    return "";
+}
+
+}
+
 }

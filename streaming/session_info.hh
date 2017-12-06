@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -54,8 +54,6 @@ class session_info {
 public:
     using inet_address = gms::inet_address;
     inet_address peer;
-    int session_index;
-    inet_address connecting;
     /** Immutable collection of receiving summaries */
     std::vector<stream_summary> receiving_summaries;
     /** Immutable collection of sending summaries*/
@@ -67,12 +65,11 @@ public:
     std::map<sstring, progress_info> sending_files;
 
     session_info() = default;
-    session_info(inet_address peer_, int session_index_, inet_address connecting_,
+    session_info(inet_address peer_,
                  std::vector<stream_summary> receiving_summaries_,
                  std::vector<stream_summary> sending_summaries_,
                  stream_session_state state_)
         : peer(peer_)
-        , connecting(connecting_)
         , receiving_summaries(std::move(receiving_summaries_))
         , sending_summaries(std::move(sending_summaries_))
         , state(state_) {

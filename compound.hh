@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 Cloudius Systems, Ltd.
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -22,32 +22,14 @@
 #pragma once
 
 #include "types.hh"
-#include <iostream>
+#include <iosfwd>
 #include <algorithm>
 #include <vector>
 #include <boost/range/iterator_range.hpp>
+#include <boost/range/adaptor/transformed.hpp>
 #include "utils/serialization.hh"
+#include "util/backtrace.hh"
 #include "unimplemented.hh"
-
-// value_traits is meant to abstract away whether we are working on 'bytes'
-// elements or 'bytes_opt' elements. We don't support optional values, but
-// there are some generic layers which use this code which provide us with
-// data in that format. In order to avoid allocation and rewriting that data
-// into a new vector just to throw it away soon after that, we accept that
-// format too.
-
-template <typename T>
-struct value_traits {
-    static const T& unwrap(const T& t) { return t; }
-};
-
-template<>
-struct value_traits<bytes_opt> {
-    static const bytes& unwrap(const bytes_opt& t) {
-        assert(t);
-        return *t;
-    }
-};
 
 enum class allow_prefixes { no, yes };
 
@@ -62,13 +44,14 @@ public:
     static constexpr bool is_prefixable = AllowPrefixes == allow_prefixes::yes;
     using prefix_type = compound_type<allow_prefixes::yes>;
     using value_type = std::vector<bytes>;
+    using size_type = uint16_t;
 
     compound_type(std::vector<data_type> types)
         : _types(std::move(types))
         , _byte_order_equal(std::all_of(_types.begin(), _types.end(), [] (auto t) {
                 return t->is_byte_order_equal();
             }))
-        , _byte_order_comparable(_types.size() == 1 && _types[0]->is_byte_order_comparable())
+        , _byte_order_comparable(false)
         , _is_reversed(_types.size() == 1 && _types[0]->is_reversed())
     { }
 
@@ -85,81 +68,56 @@ public:
     prefix_type as_prefix() {
         return prefix_type(_types);
     }
-
+private:
     /*
      * Format:
-     *   <len(value1)><value1><len(value2)><value2>...<len(value_n-1)><value_n-1>(len(value_n))?<value_n>
+     *   <len(value1)><value1><len(value2)><value2>...<len(value_n)><value_n>
      *
-     * For non-prefixable compounds, the value corresponding to the last component of types doesn't
-     * have its length encoded, its length is deduced from the input range.
-     *
-     * serialize_value() and serialize_optionals() for single element rely on the fact that for a single-element
-     * compounds their serialized form is equal to the serialized form of the component.
      */
-    template<typename Wrapped>
-    void serialize_value(const std::vector<Wrapped>& values, bytes::iterator& out) {
-        if (AllowPrefixes == allow_prefixes::yes) {
-            assert(values.size() <= _types.size());
-        } else {
-            assert(values.size() == _types.size());
-        }
-
-        size_t n_left = _types.size();
-        for (auto&& wrapped : values) {
-            auto&& val = value_traits<Wrapped>::unwrap(wrapped);
-            assert(val.size() <= std::numeric_limits<uint16_t>::max());
-            if (--n_left || AllowPrefixes == allow_prefixes::yes) {
-                write<uint16_t>(out, uint16_t(val.size()));
-            }
+    template<typename RangeOfSerializedComponents>
+    static void serialize_value(RangeOfSerializedComponents&& values, bytes::iterator& out) {
+        for (auto&& val : values) {
+            assert(val.size() <= std::numeric_limits<size_type>::max());
+            write<size_type>(out, size_type(val.size()));
             out = std::copy(val.begin(), val.end(), out);
         }
     }
-    template <typename Wrapped>
-    size_t serialized_size(const std::vector<Wrapped>& values) {
+    template <typename RangeOfSerializedComponents>
+    static size_t serialized_size(RangeOfSerializedComponents&& values) {
         size_t len = 0;
-        size_t n_left = _types.size();
-        for (auto&& wrapped : values) {
-            auto&& val = value_traits<Wrapped>::unwrap(wrapped);
-            assert(val.size() <= std::numeric_limits<uint16_t>::max());
-            if (--n_left || AllowPrefixes == allow_prefixes::yes) {
-                len += sizeof(uint16_t);
-            }
-            len += val.size();
+        for (auto&& val : values) {
+            len += sizeof(size_type) + val.size();
         }
         return len;
     }
+public:
     bytes serialize_single(bytes&& v) {
-        if (AllowPrefixes == allow_prefixes::no) {
-            assert(_types.size() == 1);
-            return std::move(v);
-        } else {
-            // FIXME: Optimize
-            std::vector<bytes> vec;
-            vec.reserve(1);
-            vec.emplace_back(std::move(v));
-            return ::serialize_value(*this, vec);
-        }
+        return serialize_value({std::move(v)});
     }
-    bytes serialize_value(const std::vector<bytes>& values) {
-        return ::serialize_value(*this, values);
-    }
-    bytes serialize_value(std::vector<bytes>&& values) {
-        if (AllowPrefixes == allow_prefixes::no && _types.size() == 1 && values.size() == 1) {
-            return std::move(values[0]);
+    template<typename RangeOfSerializedComponents>
+    static bytes serialize_value(RangeOfSerializedComponents&& values) {
+        auto size = serialized_size(values);
+        if (size > std::numeric_limits<size_type>::max()) {
+            throw std::runtime_error(sprint("Key size too large: %d > %d", size, std::numeric_limits<size_type>::max()));
         }
-        return ::serialize_value(*this, values);
+        bytes b(bytes::initialized_later(), size);
+        auto i = b.begin();
+        serialize_value(values, i);
+        return b;
+    }
+    template<typename T>
+    static bytes serialize_value(std::initializer_list<T> values) {
+        return serialize_value(boost::make_iterator_range(values.begin(), values.end()));
     }
     bytes serialize_optionals(const std::vector<bytes_opt>& values) {
-        return ::serialize_value(*this, values);
+        return serialize_value(values | boost::adaptors::transformed([] (const bytes_opt& bo) -> bytes_view {
+            if (!bo) {
+                throw std::logic_error("attempted to create key component from empty optional");
+            }
+            return *bo;
+        }));
     }
-    bytes serialize_optionals(std::vector<bytes_opt>&& values) {
-        if (AllowPrefixes == allow_prefixes::no && _types.size() == 1 && values.size() == 1) {
-            assert(values[0]);
-            return std::move(*values[0]);
-        }
-        return ::serialize_value(*this, values);
-    }
-    bytes serialize_value_deep(const std::vector<boost::any>& values) {
+    bytes serialize_value_deep(const std::vector<data_value>& values) {
         // TODO: Optimize
         std::vector<bytes> partial;
         partial.reserve(values.size());
@@ -171,39 +129,23 @@ public:
         return serialize_value(partial);
     }
     bytes decompose_value(const value_type& values) {
-        return ::serialize_value(*this, values);
+        return serialize_value(values);
     }
-    class iterator : public std::iterator<std::input_iterator_tag, bytes_view> {
+    class iterator : public std::iterator<std::input_iterator_tag, const bytes_view> {
     private:
-        ssize_t _types_left;
         bytes_view _v;
-        value_type _current;
+        bytes_view _current;
     private:
         void read_current() {
-            if (_types_left == 0) {
-                if (!_v.empty()) {
-                    throw marshal_exception();
-                }
-                _v = bytes_view(nullptr, 0);
-                return;
-            }
-            --_types_left;
-            uint16_t len;
-            if (_types_left == 0 && AllowPrefixes == allow_prefixes::no) {
-                len = _v.size();
-            } else {
+            size_type len;
+            {
                 if (_v.empty()) {
-                    if (AllowPrefixes == allow_prefixes::yes) {
-                        _types_left = 0;
-                        _v = bytes_view(nullptr, 0);
-                        return;
-                    } else {
-                        throw marshal_exception();
-                    }
+                    _v = bytes_view(nullptr, 0);
+                    return;
                 }
-                len = read_simple<uint16_t>(_v);
+                len = read_simple<size_type>(_v);
                 if (_v.size() < len) {
-                    throw marshal_exception();
+                    throw_with_backtrace<marshal_exception>(sprint("compound_type iterator - not enough bytes, expected %d, got %d", len, _v.size()));
                 }
             }
             _current = bytes_view(_v.begin(), len);
@@ -211,10 +153,10 @@ public:
         }
     public:
         struct end_iterator_tag {};
-        iterator(const compound_type& t, const bytes_view& v) : _types_left(t._types.size()), _v(v) {
+        iterator(const bytes_view& v) : _v(v) {
             read_current();
         }
-        iterator(end_iterator_tag, const bytes_view& v) : _types_left(0), _v(nullptr, 0) {}
+        iterator(end_iterator_tag, const bytes_view& v) : _v(nullptr, 0) {}
         iterator& operator++() {
             read_current();
             return *this;
@@ -226,20 +168,17 @@ public:
         }
         const value_type& operator*() const { return _current; }
         const value_type* operator->() const { return &_current; }
-        bool operator!=(const iterator& i) const { return _v.begin() != i._v.begin() || _types_left != i._types_left; }
-        bool operator==(const iterator& i) const { return _v.begin() == i._v.begin() && _types_left == i._types_left; }
+        bool operator!=(const iterator& i) const { return _v.begin() != i._v.begin(); }
+        bool operator==(const iterator& i) const { return _v.begin() == i._v.begin(); }
     };
-    iterator begin(const bytes_view& v) const {
-        return iterator(*this, v);
+    static iterator begin(const bytes_view& v) {
+        return iterator(v);
     }
-    iterator end(const bytes_view& v) const {
+    static iterator end(const bytes_view& v) {
         return iterator(typename iterator::end_iterator_tag(), v);
     }
-    boost::iterator_range<iterator> components(const bytes_view& v) const {
+    static boost::iterator_range<iterator> components(const bytes_view& v) {
         return { begin(v), end(v) };
-    }
-    auto iter_items(const bytes_view& v) {
-        return boost::iterator_range<iterator>(begin(v), end(v));
     }
     value_type deserialize_value(bytes_view v) {
         std::vector<bytes> result;
@@ -258,7 +197,7 @@ public:
         }
         auto t = _types.begin();
         size_t h = 0;
-        for (auto&& value : iter_items(v)) {
+        for (auto&& value : components(v)) {
             h ^= (*t)->hash(value);
             ++t;
         }
@@ -277,16 +216,13 @@ public:
                 return type->compare(v1, v2);
             });
     }
-    bytes from_string(sstring_view s) {
-        throw std::runtime_error("not implemented");
-    }
-    sstring to_string(const bytes& b) {
-        throw std::runtime_error("not implemented");
-    }
     // Retruns true iff given prefix has no missing components
     bool is_full(bytes_view v) const {
         assert(AllowPrefixes == allow_prefixes::yes);
         return std::distance(begin(v), end(v)) == (ssize_t)_types.size();
+    }
+    bool is_empty(bytes_view v) const {
+        return begin(v) == end(v);
     }
     void validate(bytes_view v) {
         // FIXME: implement

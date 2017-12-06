@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -38,7 +38,6 @@
 
 #pragma once
 
-#include "types.hh"
 #include "core/sstring.hh"
 #include "utils/serialization.hh"
 #include "utils/UUID.hh"
@@ -46,10 +45,10 @@
 #include "gms/inet_address.hh"
 #include "dht/i_partitioner.hh"
 #include "to_string.hh"
+#include "version.hh"
 #include <unordered_set>
 #include <vector>
-#include "message/messaging_service.hh"
-#include "version.hh"
+#include <boost/range/adaptor/transformed.hpp>
 
 namespace gms {
 
@@ -65,9 +64,7 @@ namespace gms {
  * Gossiper.instance.addApplicationState("LOAD STATE", loadState);
  */
 
-class versioned_value //implements Comparable<VersionedValue>
-{
-
+class versioned_value {
 public:
     // this must be a char that cannot be present in any token
     static constexpr char DELIMITER = ',';
@@ -84,6 +81,7 @@ public:
     static constexpr const char* REMOVED_TOKEN = "removed";
 
     static constexpr const char* HIBERNATE = "hibernate";
+    static constexpr const char* SHUTDOWN = "shutdown";
 
     // values for ApplicationState.REMOVAL_COORDINATOR
     static constexpr const char* REMOVAL_COORDINATOR = "REMOVER";
@@ -96,15 +94,9 @@ public:
                value   == other.value;
     }
 
-    versioned_value()
-        : version(version_generator::get_next_version())
-        , value("") {
-    }
-
-private:
+public:
     versioned_value(const sstring& value, int version = version_generator::get_next_version())
-        : version(version), value(value)
-    {
+        : version(version), value(value) {
 #if 0
         // blindly interning everything is somewhat suboptimal -- lots of VersionedValues are unique --
         // but harmless, and interning the non-unique ones saves significant memory.  (Unfortunately,
@@ -118,10 +110,11 @@ private:
         : version(version), value(std::move(value)) {
     }
 
+    versioned_value()
+        : version(-1) {
+    }
 
-public:
-    int compareTo(const versioned_value &value)
-    {
+    int compare_to(const versioned_value &value) {
         return version - value.version;
     }
 
@@ -133,20 +126,23 @@ public:
         return ::join(sstring(versioned_value::DELIMITER_STR), args);
     }
 
-    class versioned_value_factory {
+public:
+    class factory {
         using token = dht::token;
     public:
-#if 0
-        final IPartitioner partitioner;
-
-        public VersionedValueFactory(IPartitioner partitioner)
-        {
-            this.partitioner = partitioner;
+        sstring make_full_token_string(const std::unordered_set<token>& tokens) {
+            return ::join(";", tokens | boost::adaptors::transformed([] (const token& t) {
+                return dht::global_partitioner().to_sstring(t); })
+            );
         }
-#endif
+        sstring make_token_string(const std::unordered_set<token>& tokens) {
+            if (tokens.empty()) {
+                return "";
+            }
+            return dht::global_partitioner().to_sstring(*tokens.begin());
+        }
 
-        versioned_value clone_with_higher_version(const versioned_value& value)
-        {
+        versioned_value clone_with_higher_version(const versioned_value& value) {
             return versioned_value(value.value);
         }
 
@@ -160,19 +156,11 @@ public:
                                                    make_token_string(tokens)}));
         }
 
-        sstring make_token_string(const std::unordered_set<token>& tokens) {
-            // FIXME:
-            // return partitioner.getTokenFactory().toString(Iterables.get(tokens, 0));
-            return "TOKENS";
+        versioned_value load(double load) {
+            return versioned_value(to_sstring(load));
         }
 
-        static inline versioned_value load(double load)
-        {
-            return versioned_value(to_sstring_sprintf(load, "%g"));
-        }
-
-        versioned_value schema(const utils::UUID &new_version)
-        {
+        versioned_value schema(const utils::UUID &new_version) {
             return versioned_value(new_version.to_sstring());
         }
 
@@ -181,10 +169,10 @@ public:
                                                    make_token_string(tokens)}));
         }
 
-        versioned_value left(const std::unordered_set<token>& tokens, long expireTime) {
+        versioned_value left(const std::unordered_set<token>& tokens, int64_t expire_time) {
             return versioned_value(version_string({sstring(versioned_value::STATUS_LEFT),
                                                    make_token_string(tokens),
-                                                   std::to_string(expireTime)}));
+                                                   std::to_string(expire_time)}));
         }
 
         versioned_value moving(token t) {
@@ -193,108 +181,72 @@ public:
                                                    make_token_string(tokens)}));
         }
 
-        versioned_value host_id(const utils::UUID& hostId)
-        {
-            return versioned_value(hostId.to_sstring());
+        versioned_value host_id(const utils::UUID& host_id) {
+            return versioned_value(host_id.to_sstring());
         }
 
-        versioned_value tokens(const std::unordered_set<token> tokens) {
-            sstring tokens_string;
-            for (auto it = tokens.cbegin(); it != tokens.cend(); ) {
-                tokens_string += to_hex(it->_data);
-                if (++it != tokens.cend()) {
-                    tokens_string += ";";
-                }
-            }
-            // FIXME:
-            return versioned_value(tokens_string);
-#if 0
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            DataOutputStream out = new DataOutputStream(bos);
-            try
-            {
-                TokenSerializer.serialize(partitioner, tokens, out);
-            }
-            catch (IOException e)
-            {
-                throw new RuntimeException(e);
-            }
-            return new VersionedValue(new String(bos.toByteArray(), ISO_8859_1));
-#endif
+        versioned_value tokens(const std::unordered_set<token>& tokens) {
+            return versioned_value(make_full_token_string(tokens));
         }
 
-        versioned_value removing_nonlocal(const utils::UUID& hostId)
-        {
-            return versioned_value(sstring(REMOVING_TOKEN) + sstring(DELIMITER_STR) + hostId.to_sstring());
+        versioned_value removing_nonlocal(const utils::UUID& host_id) {
+            return versioned_value(sstring(REMOVING_TOKEN) +
+                sstring(DELIMITER_STR) + host_id.to_sstring());
         }
 
-        versioned_value removed_nonlocal(const utils::UUID& hostId, int64_t expireTime)
-        {
-            return versioned_value(sstring(REMOVED_TOKEN) + sstring(DELIMITER_STR) + hostId.to_sstring() + sstring(DELIMITER_STR) + to_sstring(expireTime));
+        versioned_value removed_nonlocal(const utils::UUID& host_id, int64_t expire_time) {
+            return versioned_value(sstring(REMOVED_TOKEN) + sstring(DELIMITER_STR) +
+                host_id.to_sstring() + sstring(DELIMITER_STR) + to_sstring(expire_time));
         }
 
-        versioned_value removal_coordinator(const utils::UUID& hostId)
-        {
-            return versioned_value(sstring(REMOVAL_COORDINATOR) + sstring(DELIMITER_STR) + hostId.to_sstring());
+        versioned_value removal_coordinator(const utils::UUID& host_id) {
+            return versioned_value(sstring(REMOVAL_COORDINATOR) +
+                sstring(DELIMITER_STR) + host_id.to_sstring());
         }
 
-        versioned_value hibernate(bool value)
-        {
+        versioned_value hibernate(bool value) {
             return versioned_value(sstring(HIBERNATE) + sstring(DELIMITER_STR) + (value ? "true" : "false"));
         }
 
-        versioned_value datacenter(const sstring& dcId)
-        {
-            return versioned_value(dcId);
+        versioned_value shutdown(bool value) {
+            return versioned_value(sstring(SHUTDOWN) + sstring(DELIMITER_STR) + (value ? "true" : "false"));
         }
 
-        versioned_value rack(const sstring &rackId)
-        {
-            return versioned_value(rackId);
+        versioned_value datacenter(const sstring& dc_id) {
+            return versioned_value(dc_id);
         }
 
-        versioned_value rpcaddress(gms::inet_address endpoint)
-        {
+        versioned_value rack(const sstring& rack_id) {
+            return versioned_value(rack_id);
+        }
+
+        versioned_value rpcaddress(gms::inet_address endpoint) {
             return versioned_value(sprint("%s", endpoint));
         }
 
-        versioned_value release_version()
-        {
+        versioned_value release_version() {
             return versioned_value(version::release());
         }
 
-        versioned_value network_version()
-        {
-            return versioned_value(sprint("%s",net::messaging_service::current_version));
-        }
+        versioned_value network_version();
 
-        versioned_value internalIP(const sstring &private_ip)
-        {
+        versioned_value internal_ip(const sstring &private_ip) {
             return versioned_value(private_ip);
         }
 
-        versioned_value severity(double value)
-        {
-            return versioned_value(to_sstring_sprintf(value, "%g"));
+        versioned_value severity(double value) {
+            return versioned_value(to_sstring(value));
         }
+
+        versioned_value supported_features(const sstring& features) {
+            return versioned_value(features);
+        }
+
+        versioned_value cache_hitrates(const sstring& hitrates) {
+            return versioned_value(hitrates);
+        }
+
     };
-
-    // The following replaces VersionedValueSerializer from the Java code
-public:
-    void serialize(bytes::iterator& out) const {
-        serialize_string(out, value);
-        serialize_int32(out, version);
-    }
-
-    static versioned_value deserialize(bytes_view& v) {
-        auto value = read_simple_short_string(v);
-        auto version = read_simple<int32_t>(v);
-        return versioned_value(std::move(value), version);
-    }
-
-    size_t serialized_size() const {
-        return serialize_string_size(value) + serialize_int32_size;
-    }
 }; // class versioned_value
 
 } // namespace gms

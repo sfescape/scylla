@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2014 Cloudius Systems
+ * Copyright (C) 2014 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -41,19 +41,10 @@
 
 #pragma once
 
-namespace transport {
-
-namespace messages {
-
-class result_message;
-
-}
-
-}
-
+#include "transport/messages_fwd.hh"
 #include "transport/event.hh"
 
-#include "cql3/statements/cf_statement.hh"
+#include "cql3/statements/raw/cf_statement.hh"
 #include "cql3/cql_statement.hh"
 
 #include "core/shared_ptr.hh"
@@ -64,55 +55,33 @@ namespace cql3 {
 
 namespace statements {
 
-namespace messages = transport::messages;
+namespace messages = cql_transport::messages;
 
 /**
  * Abstract class for statements that alter the schema.
  */
-class schema_altering_statement : public cf_statement, public cql_statement, public ::enable_shared_from_this<schema_altering_statement> {
+class schema_altering_statement : public raw::cf_statement, public cql_statement_no_metadata {
 private:
     const bool _is_column_family_level;
 
     future<::shared_ptr<messages::result_message>>
     execute0(distributed<service::storage_proxy>& proxy, service::query_state& state, const query_options& options, bool);
 protected:
-    schema_altering_statement()
-        : cf_statement{::shared_ptr<cf_name>{}}
-        , _is_column_family_level{false}
-    { }
+    schema_altering_statement();
 
-    schema_altering_statement(::shared_ptr<cf_name> name)
-        : cf_statement{std::move(name)}
-        , _is_column_family_level{true}
-    { }
+    schema_altering_statement(::shared_ptr<cf_name> name);
 
-    virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override {
-        return cf_statement::uses_function(ks_name, function_name);
-    }
+    virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override;
 
-    virtual uint32_t get_bound_terms() override {
-        return 0;
-    }
+    virtual bool depends_on_keyspace(const sstring& ks_name) const override;
 
-    virtual void prepare_keyspace(const service::client_state& state) override {
-        if (_is_column_family_level) {
-            cf_statement::prepare_keyspace(state);
-        }
-    }
+    virtual bool depends_on_column_family(const sstring& cf_name) const override;
 
-    virtual ::shared_ptr<prepared> prepare(database& db) override {
-        return ::make_shared<parsed_statement::prepared>(this->shared_from_this());
-    }
+    virtual uint32_t get_bound_terms() override;
 
-    virtual shared_ptr<transport::event::schema_change> change_event() = 0;
+    virtual void prepare_keyspace(const service::client_state& state) override;
 
-    /**
-     * Announces the migration to other nodes in the cluster.
-     * @return true if the execution of this statement resulted in a schema change, false otherwise (when IF NOT EXISTS
-     * is used, for example)
-     * @throws RequestValidationException
-     */
-    virtual future<bool> announce_migration(distributed<service::storage_proxy>& proxy, bool is_local_only) = 0;
+    virtual future<::shared_ptr<cql_transport::event::schema_change>> announce_migration(distributed<service::storage_proxy>& proxy, bool is_local_only) = 0;
 
     virtual future<::shared_ptr<messages::result_message>>
     execute(distributed<service::storage_proxy>& proxy, service::query_state& state, const query_options& options) override;

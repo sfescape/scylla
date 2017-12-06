@@ -8,13 +8,16 @@
    ],
    "apis":[
       {
-         "path":"/messaging_service/totaltimeouts",
+         "path":"/messaging_service/messages/timeout",
          "operations":[
             {
                "method":"GET",
-               "summary":"Total number of timeouts happened on this node",
-               "type":"long",
-               "nickname":"get_totaltimeouts",
+               "summary":"Get the number of timeout messages",
+               "type":"array",
+               "items":{
+                  "type":"message_counter"
+               },
+               "nickname":"get_timeout_messages",
                "produces":[
                   "application/json"
                ],
@@ -25,7 +28,7 @@
          ]
       },
       {
-         "path":"/messaging_service/messages/dropped",
+         "path":"/messaging_service/messages/dropped_by_ver",
          "operations":[
             {
                "method":"GET",
@@ -33,6 +36,25 @@
                "type":"array",
                "items":{
                   "type":"verb_counter"
+               },
+               "nickname":"get_dropped_messages_by_ver",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/messaging_service/messages/dropped",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get the number of messages that were dropped before sending",
+               "type":"array",
+               "items":{
+                  "type":"message_counter"
                },
                "nickname":"get_dropped_messages",
                "produces":[
@@ -143,6 +165,49 @@
                ]
             }
          ]
+      },
+      {
+         "path":"/messaging_service/messages/respond_completed",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get the number of completed respond messages",
+               "type":"array",
+               "items":{
+                  "type":"message_counter"
+               },
+               "nickname":"get_respond_completed_messages",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
+         "path":"/messaging_service/version",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Get the version number",
+               "type":"int",
+               "nickname":"get_version",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+                  {
+                     "name":"addr",
+                     "description":"Address",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"query"
+                  }
+               ]
+            }
+         ]
       }
    ],
    "models":{
@@ -150,10 +215,10 @@
          "id":"message_counter",
          "description":"Holds command counters",
          "properties":{
-            "count":{
+            "value":{
                "type":"long"
             },
-            "ip":{
+            "key":{
                "type":"string"
             }
          }
@@ -168,46 +233,27 @@
             "verb":{
                "type":"string",
                "enum":[
-                  "MUTATION",
-                  "BINARY",
-                  "READ_REPAIR",
-                  "READ",
-                  "REQUEST_RESPONSE",
-                  "STREAM_INITIATE",
-                  "STREAM_INITIATE_DONE",
-                  "STREAM_REPLY",
-                  "STREAM_REQUEST",
-                  "RANGE_SLICE",
-                  "BOOTSTRAP_TOKEN",
-                  "TREE_REQUEST",
-                  "TREE_RESPONSE",
-                  "JOIN",
-                  "GOSSIP_DIGEST_SYN",
-                  "GOSSIP_DIGEST_ACK",
-                  "GOSSIP_DIGEST_ACK2",
-                  "DEFINITIONS_ANNOUNCE",
-                  "DEFINITIONS_UPDATE",
-                  "TRUNCATE",
-                  "SCHEMA_CHECK",
-                  "INDEX_SCAN",
-                  "REPLICATION_FINISHED",
-                  "INTERNAL_RESPONSE",
-                  "COUNTER_MUTATION",
-                  "STREAMING_REPAIR_REQUEST",
-                  "STREAMING_REPAIR_RESPONSE",
-                  "SNAPSHOT",
-                  "MIGRATION_REQUEST",
-                  "GOSSIP_SHUTDOWN",
-                  "_TRACE",
-                  "ECHO",
-                  "REPAIR_MESSAGE",
-                  "PAXOS_PREPARE",
-                  "PAXOS_PROPOSE",
-                  "PAXOS_COMMIT",
-                  "PAGED_RANGE",
-                  "UNUSED_1",
-                  "UNUSED_2",
-                  "UNUSED_3"
+                 "CLIENT_ID",
+                 "MUTATION",
+                 "MUTATION_DONE",
+                 "READ_DATA",
+                 "READ_MUTATION_DATA",
+                 "READ_DIGEST",
+                 "GOSSIP_ECHO",
+                 "GOSSIP_DIGEST_SYN",
+                 "GOSSIP_DIGEST_ACK2",
+                 "GOSSIP_SHUTDOWN",
+                 "DEFINITIONS_UPDATE",
+                 "TRUNCATE",
+                 "REPLICATION_FINISHED",
+                 "MIGRATION_REQUEST",
+                 "PREPARE_MESSAGE",
+                 "PREPARE_DONE_MESSAGE",
+                 "STREAM_MUTATION",
+                 "STREAM_MUTATION_DONE",
+                 "COMPLETE_MESSAGE",
+                 "REPAIR_CHECKSUM_RANGE",
+                 "GET_SCHEMA_VERSION"
                ]
             }
          }

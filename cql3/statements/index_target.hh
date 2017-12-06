@@ -17,9 +17,9 @@
  */
 
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  *
- * Modified by Cloudius Systems
+ * Modified by ScyllaDB
  */
 
 /*
@@ -50,6 +50,9 @@ namespace cql3 {
 namespace statements {
 
 struct index_target {
+    static const sstring target_option_name;
+    static const sstring custom_index_option_name;
+
     enum class target_type {
         values, keys, keys_and_values, full
     };
@@ -61,8 +64,11 @@ struct index_target {
             : column(c), type(t) {
     }
 
+    sstring as_cql_string(schema_ptr schema) const;
+
     static sstring index_option(target_type type);
     static target_type from_column_definition(const column_definition& cd);
+    static index_target::target_type from_sstring(const sstring& s);
 
     class raw {
     public:
@@ -80,6 +86,8 @@ struct index_target {
         ::shared_ptr<index_target> prepare(schema_ptr);
     };
 };
+
+sstring to_sstring(index_target::target_type type);
 
 }
 }

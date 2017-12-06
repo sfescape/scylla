@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -22,6 +22,8 @@
 #include "cql3/column_identifier.hh"
 #include "exceptions/exceptions.hh"
 #include "cql3/selection/simple_selector.hh"
+
+#include <regex>
 
 namespace cql3 {
 
@@ -57,6 +59,17 @@ const bytes& column_identifier::name() const {
 
 sstring column_identifier::to_string() const {
     return _text;
+}
+
+sstring column_identifier::to_cql_string() const {
+    static const std::regex unquoted_identifier_re("[a-z][a-z0-9_]*");
+    if (std::regex_match(_text.begin(), _text.end(), unquoted_identifier_re)) {
+        return _text;
+    }
+    static const std::regex double_quote_re("\"");
+    std::string result = _text;
+    std::regex_replace(result, double_quote_re, "\"\"");
+    return '"' + result + '"';
 }
 
 column_identifier::raw::raw(sstring raw_text, bool keep_case)
@@ -120,4 +133,8 @@ column_identifier::new_selector_factory(database& db, schema_ptr schema, std::ve
     return selection::simple_selector::new_factory(def->name_as_text(), add_and_get_index(*def, defs), def->type);
 }
 
+}
+
+bool cql3::column_identifier::text_comparator::operator()(const cql3::column_identifier& c1, const cql3::column_identifier& c2) const {
+    return c1.text() < c2.text();
 }

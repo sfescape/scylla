@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -38,6 +38,8 @@
 
 #pragma once
 
+#include <ostream>
+
 namespace streaming {
 
 enum class stream_session_state {
@@ -48,5 +50,7 @@ enum class stream_session_state {
     COMPLETE,
     FAILED,
 };
+
+std::ostream& operator<<(std::ostream& os, const stream_session_state& s);
 
 } // namespace

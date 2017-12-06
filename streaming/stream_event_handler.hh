@@ -15,8 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Modified by Cloudius Systems.
- * Copyright 2015 Cloudius Systems.
+ * Modified by ScyllaDB
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -53,6 +53,7 @@ public:
     virtual void handle_stream_event(session_complete_event event) {}
     virtual void handle_stream_event(progress_event event) {}
     virtual void handle_stream_event(session_prepared_event event) {}
+    virtual ~stream_event_handler() {};
 };
 
 } // namespace streaming

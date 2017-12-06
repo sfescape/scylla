@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Cloudius Systems
+ * Copyright (C) 2015 ScyllaDB
  */
 
 /*
@@ -39,6 +39,8 @@ private:
         ATOM_NAME_BYTES,
         ATOM_MASK,
         ATOM_MASK_2,
+        COUNTER_CELL,
+        COUNTER_CELL_2,
         EXPIRING_CELL,
         EXPIRING_CELL_2,
         EXPIRING_CELL_3,
@@ -51,6 +53,7 @@ private:
         RANGE_TOMBSTONE_3,
         RANGE_TOMBSTONE_4,
         RANGE_TOMBSTONE_5,
+        STOP_THEN_ATOM_START,
     } _state = state::ROW_START;
 
     row_consumer& _consumer;
@@ -60,21 +63,18 @@ private:
 
     // state for reading a cell
     bool _deleted;
+    bool _counter;
     uint32_t _ttl, _expiration;
 
-    static inline bytes_view to_bytes_view(temporary_buffer<char>& b) {
-        // The sstable code works with char, our "bytes_view" works with
-        // byte_t. Rather than change all the code, let's do a cast...
-        using byte = bytes_view::value_type;
-        return bytes_view(reinterpret_cast<const byte*>(b.get()), b.size());
-    }
-
+    bool _shadowable;
 public:
     bool non_consuming() const {
         return (((_state == state::DELETION_TIME_3)
                 || (_state == state::CELL_VALUE_BYTES_2)
                 || (_state == state::ATOM_START_2)
                 || (_state == state::ATOM_MASK_2)
+                || (_state == state::STOP_THEN_ATOM_START)
+                || (_state == state::COUNTER_CELL_2)
                 || (_state == state::EXPIRING_CELL_3)) && (_prestate == prestate::NONE));
     }
 
@@ -101,6 +101,7 @@ public:
             return row_consumer::proceed::yes;
         }
 #endif
+        sstlog.trace("data_consume_row_context {}: state={}, size={}", this, static_cast<int>(_state), data.size());
         switch (_state) {
         case state::ROW_START:
             // read 2-byte key length into _u16
@@ -130,11 +131,14 @@ public:
             deletion_time del;
             del.local_deletion_time = _u32;
             del.marked_for_delete_at = _u64;
-            _consumer.consume_row_start(to_bytes_view(_key), del);
+            auto ret = _consumer.consume_row_start(key_view(to_bytes_view(_key)), del);
             // after calling the consume function, we can release the
             // buffers we held for it.
             _key.release();
             _state = state::ATOM_START;
+            if (ret == row_consumer::proceed::no) {
+                return row_consumer::proceed::no;
+            }
         }
         case state::ATOM_START:
             if (read_16(data) == read_status::ready) {
@@ -176,33 +180,41 @@ public:
             }
             // fallthrough
         case state::ATOM_MASK_2: {
-            auto mask = _u8;
-            enum mask_type {
-                DELETION_MASK = 0x01,
-                EXPIRATION_MASK = 0x02,
-                COUNTER_MASK = 0x04,
-                COUNTER_UPDATE_MASK = 0x08,
-                RANGE_TOMBSTONE_MASK = 0x10,
-            };
-            if (mask & RANGE_TOMBSTONE_MASK) {
+            auto const mask = column_mask(_u8);
+
+            if ((mask & (column_mask::range_tombstone | column_mask::shadowable)) != column_mask::none) {
                 _state = state::RANGE_TOMBSTONE;
-            } else if (mask & COUNTER_MASK) {
-                // FIXME: see ColumnSerializer.java:deserializeColumnBody
-                throw malformed_sstable_exception("FIXME COUNTER_MASK");
-            } else if (mask & EXPIRATION_MASK) {
+                _shadowable = (mask & column_mask::shadowable) != column_mask::none;
+            } else if ((mask & column_mask::counter) != column_mask::none) {
                 _deleted = false;
+                _counter = true;
+                _state = state::COUNTER_CELL;
+            } else if ((mask & column_mask::expiration) != column_mask::none) {
+                _deleted = false;
+                _counter = false;
                 _state = state::EXPIRING_CELL;
             } else {
                 // FIXME: see ColumnSerializer.java:deserializeColumnBody
-                if (mask & COUNTER_UPDATE_MASK) {
+                if ((mask & column_mask::counter_update) != column_mask::none) {
                     throw malformed_sstable_exception("FIXME COUNTER_UPDATE_MASK");
                 }
                 _ttl = _expiration = 0;
-                _deleted = mask & DELETION_MASK;
+                _deleted = (mask & column_mask::deletion) != column_mask::none;
+                _counter = false;
                 _state = state::CELL;
             }
             break;
         }
+        case state::COUNTER_CELL:
+            if (read_64(data) != read_status::ready) {
+                _state = state::COUNTER_CELL_2;
+                break;
+            }
+            // fallthrough
+        case state::COUNTER_CELL_2:
+            // _timestamp_of_last_deletion = _u64;
+            _state = state::CELL;
+            goto state_CELL;
         case state::EXPIRING_CELL:
             if (read_32(data) != read_status::ready) {
                 _state = state::EXPIRING_CELL_2;
@@ -219,6 +231,7 @@ public:
         case state::EXPIRING_CELL_3:
             _expiration = _u32;
             _state = state::CELL;
+        state_CELL:
         case state::CELL: {
             if (read_64(data) != read_status::ready) {
                 _state = state::CELL_2;
@@ -236,6 +249,7 @@ public:
                 // need to copy, and can skip the CELL_VALUE_BYTES_2 state.
                 //
                 // finally pass it to the consumer:
+                row_consumer::proceed ret;
                 if (_deleted) {
                     if (_val.size() != 4) {
                         throw malformed_sstable_exception("deleted cell expects local_deletion_time value");
@@ -243,9 +257,12 @@ public:
                     deletion_time del;
                     del.local_deletion_time = consume_be<uint32_t>(_val);
                     del.marked_for_delete_at = _u64;
-                    _consumer.consume_deleted_cell(to_bytes_view(_key), del);
+                    ret = _consumer.consume_deleted_cell(to_bytes_view(_key), del);
+                } else if (_counter) {
+                    ret = _consumer.consume_counter_cell(to_bytes_view(_key),
+                            to_bytes_view(_val), _u64);
                 } else {
-                    _consumer.consume_cell(to_bytes_view(_key),
+                    ret = _consumer.consume_cell(to_bytes_view(_key),
                             to_bytes_view(_val), _u64, _ttl, _expiration);
                 }
                 // after calling the consume function, we can release the
@@ -253,11 +270,16 @@ public:
                 _key.release();
                 _val.release();
                 _state = state::ATOM_START;
+                if (ret == row_consumer::proceed::no) {
+                    return row_consumer::proceed::no;
+                }
             } else {
                 _state = state::CELL_VALUE_BYTES_2;
             }
             break;
         case state::CELL_VALUE_BYTES_2:
+        {
+            row_consumer::proceed ret;
             if (_deleted) {
                 if (_val.size() != 4) {
                     throw malformed_sstable_exception("deleted cell expects local_deletion_time value");
@@ -265,9 +287,12 @@ public:
                 deletion_time del;
                 del.local_deletion_time = consume_be<uint32_t>(_val);
                 del.marked_for_delete_at = _u64;
-                _consumer.consume_deleted_cell(to_bytes_view(_key), del);
+                ret = _consumer.consume_deleted_cell(to_bytes_view(_key), del);
+            } else if (_counter) {
+                ret = _consumer.consume_counter_cell(to_bytes_view(_key),
+                        to_bytes_view(_val), _u64);
             } else {
-                _consumer.consume_cell(to_bytes_view(_key),
+                ret = _consumer.consume_cell(to_bytes_view(_key),
                         to_bytes_view(_val), _u64, _ttl, _expiration);
             }
             // after calling the consume function, we can release the
@@ -275,7 +300,11 @@ public:
             _key.release();
             _val.release();
             _state = state::ATOM_START;
+            if (ret == row_consumer::proceed::no) {
+                return row_consumer::proceed::no;
+            }
             break;
+        }
         case state::RANGE_TOMBSTONE:
             if (read_16(data) != read_status::ready) {
                 _state = state::RANGE_TOMBSTONE_2;
@@ -302,13 +331,20 @@ public:
             deletion_time del;
             del.local_deletion_time = _u32;
             del.marked_for_delete_at = _u64;
-            _consumer.consume_range_tombstone(to_bytes_view(_key),
-                    to_bytes_view(_val), del);
+            auto ret = _shadowable
+                     ? _consumer.consume_shadowable_row_tombstone(to_bytes_view(_key), del)
+                     : _consumer.consume_range_tombstone(to_bytes_view(_key), to_bytes_view(_val), del);
             _key.release();
             _val.release();
             _state = state::ATOM_START;
+            if (ret == row_consumer::proceed::no) {
+                return row_consumer::proceed::no;
+            }
             break;
         }
+        case state::STOP_THEN_ATOM_START:
+            _state = state::ATOM_START;
+            return row_consumer::proceed::no;
         default:
             throw malformed_sstable_exception("unknown state");
         }
@@ -317,59 +353,102 @@ public:
     }
 
     data_consume_rows_context(row_consumer& consumer,
-            input_stream<char> && input, uint64_t maxlen) :
-            continuous_data_consumer(std::move(input), maxlen)
-            , _consumer(consumer) {
+            input_stream<char> && input, uint64_t start, uint64_t maxlen)
+                : continuous_data_consumer(std::move(input), start, maxlen)
+                , _consumer(consumer) {
     }
 
     void verify_end_state() {
+        // If reading a partial row (i.e., when we have a clustering row
+        // filter and using a promoted index), we may be in ATOM_START or ATOM_START_2
+        // state instead of ROW_START. In that case we did not read the
+        // end-of-row marker and consume_row_end() was never called.
+        if (_state == state::ATOM_START || _state == state::ATOM_START_2) {
+            _consumer.consume_row_end();
+            return;
+        }
         if (_state != state::ROW_START || _prestate != prestate::NONE) {
             throw malformed_sstable_exception("end of input, but not end of row");
         }
     }
-};
 
-// data_consume_rows() and data_consume_rows_at_once() both can read just a
-// single row or many rows. The difference is that data_consume_rows_at_once()
-// is optimized to reading one or few rows (reading it all into memory), while
-// data_consume_rows() uses a read buffer, so not all the rows need to fit
-// memory in the same time (they are delivered to the consumer one by one).
-class data_consume_context::impl {
-private:
-    std::unique_ptr<data_consume_rows_context> _ctx;
-public:
-    impl(row_consumer& consumer,
-            input_stream<char>&& input, uint64_t maxlen) :
-                _ctx(new data_consume_rows_context(consumer, std::move(input), maxlen)) { }
-    future<> read() {
-        return _ctx->consume_input(*_ctx);
+    void reset(indexable_element el) {
+        switch (el) {
+        case indexable_element::partition:
+            _state = state::ROW_START;
+            break;
+        case indexable_element::cell:
+            _state = state::ATOM_START;
+            break;
+        default:
+            assert(0);
+        }
+        _consumer.reset(el);
     }
 };
 
-data_consume_context::~data_consume_context() = default;
-data_consume_context::data_consume_context(data_consume_context&&) = default;
-data_consume_context& data_consume_context::operator=(data_consume_context&&) = default;
-data_consume_context::data_consume_context(std::unique_ptr<impl> p) : _pimpl(std::move(p)) { }
+data_consume_context::~data_consume_context() {
+    if (_ctx) {
+        auto f = _ctx->close();
+        f.handle_exception([ctx = std::move(_ctx), sst = std::move(_sst)](auto) {});
+    }
+};
+data_consume_context::data_consume_context(data_consume_context&& o) noexcept = default;
+data_consume_context& data_consume_context::operator=(data_consume_context&& o) noexcept = default;
+
+data_consume_context::data_consume_context(shared_sstable sst, row_consumer& consumer, input_stream<char>&& input, uint64_t start, uint64_t maxlen)
+    : _sst(std::move(sst)), _ctx(new data_consume_rows_context(consumer, std::move(input), start, maxlen))
+{ }
+data_consume_context::data_consume_context() = default;
+data_consume_context::operator bool() const noexcept {
+    return bool(_ctx);
+}
 future<> data_consume_context::read() {
-    return _pimpl->read();
+    return _ctx->consume_input(*_ctx);
+}
+future<> data_consume_context::fast_forward_to(uint64_t begin, uint64_t end) {
+    _ctx->reset(indexable_element::partition);
+    return _ctx->fast_forward_to(begin, end);
+}
+future<> data_consume_context::skip_to(indexable_element el, uint64_t begin) {
+    sstlog.trace("data_consume_rows_context {}: skip_to({} -> {}, el={})", _ctx.get(), _ctx->position(), begin, static_cast<int>(el));
+    if (begin <= _ctx->position()) {
+        return make_ready_future<>();
+    }
+    _ctx->reset(el);
+    return _ctx->skip_to(begin);
+}
+bool data_consume_context::eof() const {
+    return _ctx->eof();
 }
 
 data_consume_context sstable::data_consume_rows(
-        row_consumer& consumer, uint64_t start, uint64_t end) {
-    auto estimated_size = std::min(uint64_t(sstable_buffer_size), align_up(end - start, uint64_t(8 << 10)));
-    return std::make_unique<data_consume_context::impl>(
-            consumer, data_stream_at(start, std::max<size_t>(estimated_size, 8192)), end - start);
+        row_consumer& consumer, sstable::disk_read_range toread, uint64_t last_end) {
+    // Although we were only asked to read until toread.end, we'll not limit
+    // the underlying file input stream to this end, but rather to last_end.
+    // This potentially enables read-ahead beyond end, until last_end, which
+    // can be beneficial if the user wants to fast_forward_to() on the
+    // returned context, and may make small skips.
+    return { shared_from_this(), consumer, data_stream(toread.start, last_end - toread.start,
+             consumer.io_priority(), consumer.resource_tracker(), _partition_range_history), toread.start, toread.end - toread.start };
 }
 
+data_consume_context sstable::data_consume_single_partition(
+        row_consumer& consumer, sstable::disk_read_range toread) {
+    return { shared_from_this(), consumer, data_stream(toread.start, toread.end - toread.start,
+             consumer.io_priority(), consumer.resource_tracker(), _single_partition_history), toread.start, toread.end - toread.start };
+}
+
+
 data_consume_context sstable::data_consume_rows(row_consumer& consumer) {
-    return data_consume_rows(consumer, 0, data_size());
+    return data_consume_rows(consumer, {0, data_size()}, data_size());
 }
 
 future<> sstable::data_consume_rows_at_once(row_consumer& consumer,
         uint64_t start, uint64_t end) {
-    return data_read(start, end - start).then([&consumer]
+    return data_read(start, end - start, consumer.io_priority()).then([&consumer]
                                                (temporary_buffer<char> buf) {
-        data_consume_rows_context ctx(consumer, input_stream<char>(), -1);
+        data_consume_rows_context ctx(consumer, input_stream<char>(), 0, -1);
         ctx.process(buf);
         ctx.verify_end_state();
     });
